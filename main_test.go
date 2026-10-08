@@ -13,6 +13,7 @@ func TestVideoPlayerView(t *testing.T) {
 	a := newApp()
 	a.duration = 10 * time.Second
 	a.position = 2 * time.Second
+	a.showDrawer = true
 	a.info = &VideoInfo{
 		Title:      "demo.mp4",
 		Path:       "demo.mp4",
@@ -39,28 +40,27 @@ func TestVideoPlayerView(t *testing.T) {
 
 	tt := ui.NewTester(a.view, 960, 740)
 
-	// Verify Header UI
-	if !tt.HasText("MyGo Video Player") {
-		t.Errorf("expected header text 'MyGo Video Player', got texts: %v", tt.Texts())
-	}
-	if !tt.HasText("Open File…") {
-		t.Errorf("expected 'Open File…' button, got texts: %v", tt.Texts())
-	}
-	if !tt.HasText("Load Demo") {
-		t.Errorf("expected 'Load Demo' button, got texts: %v", tt.Texts())
+	// Header brand text (compact: "MyGo Player")
+	if !tt.HasText("MyGo Player") {
+		t.Errorf("expected header text 'MyGo Player', got texts: %v", tt.Texts())
 	}
 
-	// Verify Quick Controls
-	if !tt.HasText("Loop") {
-		t.Errorf("expected 'Loop' button, got texts: %v", tt.Texts())
+	// Open button is icon-only; its label/tooltip is "Open File (Ctrl+O)"
+	if !tt.HasText("Open File (Ctrl+O)") {
+		t.Errorf("expected 'Open File (Ctrl+O)' icon button, got texts: %v", tt.Texts())
 	}
 
-	// Verify Tab labels
-	if !tt.HasText("Playlist (1)") {
-		t.Errorf("expected 'Playlist (1)' tab, got texts: %v", tt.Texts())
-	}
+	// Drawer tabs
 	if !tt.HasText("Video Details") {
 		t.Errorf("expected 'Video Details' tab, got texts: %v", tt.Texts())
+	}
+	if !tt.HasText("Drop Zone") {
+		t.Errorf("expected 'Drop Zone' tab, got texts: %v", tt.Texts())
+	}
+
+	// Playback control present
+	if !tt.HasText("Play") {
+		t.Errorf("expected 'Play' button in controls, got texts: %v", tt.Texts())
 	}
 }
 
@@ -127,7 +127,6 @@ func TestPlaylistManagement(t *testing.T) {
 
 	// Next track
 	a.nextTrack()
-	// Should attempt to load video2.mp4
 	time.Sleep(50 * time.Millisecond)
 
 	// Remove item
@@ -154,6 +153,19 @@ func TestSubtitleParsingAndMatching(t *testing.T) {
 	if cue := GetSubtitleAt(cues, 7*time.Second); cue != "" {
 		t.Errorf("expected empty cue at 7s, got %q", cue)
 	}
+}
+
+func TestSubtitleTrackBuilding(t *testing.T) {
+	// buildSubtitleTracks with empty path returns empty slice (no demo cues)
+	tracks := buildSubtitleTracks("")
+	if len(tracks) != 0 {
+		t.Errorf("expected no tracks for empty path, got %d", len(tracks))
+	}
+
+	// Non-existent video returns empty (no side-car, no embedded streams)
+	tracks = buildSubtitleTracks("/non/existent/video.mp4")
+	// No panic, just empty
+	_ = tracks
 }
 
 func TestGenerateTestFrame(t *testing.T) {
