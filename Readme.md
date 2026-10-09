@@ -9,6 +9,9 @@ Video player in MyGo Framework with GpuPlayer support.
 - [x] Seeking
 - [x] Volume control
 - [x] Fullscreen mode
+- [ ] Audio playback
+- [x] Subtitle support
+- [ ] Hardware decoding support (NVDEC)
 
 ## Dependencies
 
