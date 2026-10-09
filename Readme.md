@@ -5,10 +5,10 @@ Video player in MyGo Framework with GpuPlayer support.
 ## Features
 
 - [x] Basic video playback
-- [ ] Pause and resume
-- [ ] Seeking
-- [ ] Volume control
-- [ ] Fullscreen mode
+- [x] Pause and resume
+- [x] Seeking
+- [x] Volume control
+- [x] Fullscreen mode
 
 ## Dependencies
 
