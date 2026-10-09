@@ -19,10 +19,11 @@ import (
 	"time"
 )
 
+// defaultWidth / defaultHeight are used only as fallbacks before the first
+// video is probed. Actual decoding uses the real video dimensions.
 const (
-	stageWidth  = 640
-	stageHeight = 360
-	frameBytes  = stageWidth * stageHeight * 4
+	defaultWidth  = 1280
+	defaultHeight = 720
 )
 
 // VideoInfo holds metadata about a media file.
@@ -64,8 +65,8 @@ func ProbeVideo(path string) (*VideoInfo, error) {
 		Path:     path,
 		Title:    filepath.Base(path),
 		FileSize: st.Size(),
-		Width:    stageWidth,
-		Height:   stageHeight,
+		Width:    defaultWidth,
+		Height:   defaultHeight,
 		FPS:      25,
 		Duration: 10 * time.Second,
 	}
@@ -115,36 +116,58 @@ func ProbeVideo(path string) (*VideoInfo, error) {
 	return info, nil
 }
 
-// ExtractSingleFrame extracts one RGBA frame at the specified timestamp.
+// ExtractSingleFrame extracts one RGBA frame at the specified timestamp at
+// the video's native resolution (no downscale).
 func ExtractSingleFrame(path string, at time.Duration) (image.Image, error) {
-	scaleFilter := fmt.Sprintf("scale=%d:%d:force_original_aspect_ratio=decrease,pad=%d:%d:(ow-iw)/2:(oh-ih)/2:black",
-		stageWidth, stageHeight, stageWidth, stageHeight)
+	return ExtractSingleFrameAt(path, at, 0, 0)
+}
+
+// ExtractSingleFrameAt extracts a frame; if w/h are 0 the native resolution is kept.
+func ExtractSingleFrameAt(path string, at time.Duration, w, h int) (image.Image, error) {
+	fw, fh := w, h
+	if fw <= 0 || fh <= 0 {
+		// Let ffmpeg keep native resolution — probe it first
+		probe, _ := ProbeVideo(path)
+		if probe != nil && probe.Width > 0 && probe.Height > 0 {
+			fw, fh = probe.Width, probe.Height
+		} else {
+			fw, fh = defaultWidth, defaultHeight
+		}
+	}
 
 	secStr := fmt.Sprintf("%.3f", at.Seconds())
-	cmd := exec.Command("ffmpeg", "-ss", secStr, "-i", path, "-vframes", "1",
-		"-vf", scaleFilter, "-f", "rawvideo", "-pix_fmt", "rgba", "-")
+	cmd := exec.Command("ffmpeg",
+		"-ss", secStr,
+		"-i", path,
+		"-vframes", "1",
+		"-s", fmt.Sprintf("%dx%d", fw, fh),
+		"-f", "rawvideo",
+		"-pix_fmt", "rgba",
+		"-",
+	)
 	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: 0x08000000}
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		return GenerateTestFrame(filepath.Base(path), at, 10*time.Second, stageWidth, stageHeight), nil
+		return GenerateTestFrame(filepath.Base(path), at, 10*time.Second, fw, fh), nil
 	}
 	if err := cmd.Start(); err != nil {
-		return GenerateTestFrame(filepath.Base(path), at, 10*time.Second, stageWidth, stageHeight), nil
+		return GenerateTestFrame(filepath.Base(path), at, 10*time.Second, fw, fh), nil
 	}
 
-	buf := make([]byte, frameBytes)
+	bufSize := fw * fh * 4
+	buf := make([]byte, bufSize)
 	_, readErr := io.ReadFull(stdout, buf)
 	_ = cmd.Wait()
 
 	if readErr != nil {
-		return GenerateTestFrame(filepath.Base(path), at, 10*time.Second, stageWidth, stageHeight), nil
+		return GenerateTestFrame(filepath.Base(path), at, 10*time.Second, fw, fh), nil
 	}
 
 	img := &image.RGBA{
 		Pix:    buf,
-		Stride: stageWidth * 4,
-		Rect:   image.Rect(0, 0, stageWidth, stageHeight),
+		Stride: fw * 4,
+		Rect:   image.Rect(0, 0, fw, fh),
 	}
 	return img, nil
 }
@@ -159,6 +182,9 @@ type PlaybackEngine struct {
 	rate       float64
 	volume     float64
 	muted      bool
+	// Native video dimensions — set via SetResolution after probing.
+	vidWidth   int
+	vidHeight  int
 	cancelFunc context.CancelFunc
 	onFrame    func(img image.Image, pos time.Duration)
 	onEnd      func()
@@ -167,10 +193,12 @@ type PlaybackEngine struct {
 // NewPlaybackEngine initializes a new engine.
 func NewPlaybackEngine(onFrame func(img image.Image, pos time.Duration), onEnd func()) *PlaybackEngine {
 	return &PlaybackEngine{
-		rate:    1.0,
-		volume:  0.8,
-		onFrame: onFrame,
-		onEnd:   onEnd,
+		rate:      1.0,
+		volume:    0.8,
+		vidWidth:  defaultWidth,
+		vidHeight: defaultHeight,
+		onFrame:   onFrame,
+		onEnd:     onEnd,
 	}
 }
 
@@ -182,6 +210,18 @@ func (e *PlaybackEngine) Load(path string, duration time.Duration) {
 	e.filePath = path
 	e.duration = duration
 	e.position = 0
+}
+
+// SetResolution updates the decode resolution to the video's native size.
+// Call this after Load when the VideoInfo is available.
+func (e *PlaybackEngine) SetResolution(w, h int) {
+	if w <= 0 || h <= 0 {
+		return
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.vidWidth = w
+	e.vidHeight = h
 }
 
 // Play begins or resumes playback.
@@ -297,14 +337,16 @@ func (e *PlaybackEngine) startStreamLocked() {
 	duration := e.duration
 	vol := e.volume
 	isMuted := e.muted
+	vw := e.vidWidth
+	vh := e.vidHeight
 
 	// Audio pipeline via ffplay
 	if !isMuted && vol > 0 {
 		go e.runAudio(ctx, path, startPos, rate, vol)
 	}
 
-	// Video frame reader pipeline
-	go e.runVideo(ctx, path, startPos, rate, duration)
+	// Video frame reader pipeline (native resolution)
+	go e.runVideo(ctx, path, startPos, rate, duration, vw, vh)
 }
 
 func (e *PlaybackEngine) runAudio(ctx context.Context, path string, start time.Duration, rate, vol float64) {
@@ -325,16 +367,14 @@ func (e *PlaybackEngine) runAudio(ctx context.Context, path string, start time.D
 	_ = cmd.Run()
 }
 
-func (e *PlaybackEngine) runVideo(ctx context.Context, path string, start time.Duration, rate float64, duration time.Duration) {
-	scaleFilter := fmt.Sprintf("scale=%d:%d:force_original_aspect_ratio=decrease,pad=%d:%d:(ow-iw)/2:(oh-ih)/2:black",
-		stageWidth, stageHeight, stageWidth, stageHeight)
-
-	// Stream 25 fps raw RGBA video
+func (e *PlaybackEngine) runVideo(ctx context.Context, path string, start time.Duration, rate float64, duration time.Duration, vw, vh int) {
+	// Decode at the video's native pixel dimensions — no quality loss.
+	// -s WxH is faster than -vf scale and does not add padding.
 	targetFPS := 25.0
 	cmd := exec.CommandContext(ctx, "ffmpeg",
 		"-ss", fmt.Sprintf("%.3f", start.Seconds()),
 		"-i", path,
-		"-vf", scaleFilter,
+		"-s", fmt.Sprintf("%dx%d", vw, vh),
 		"-f", "rawvideo",
 		"-pix_fmt", "rgba",
 		"-r", fmt.Sprintf("%.1f", targetFPS),
@@ -353,6 +393,7 @@ func (e *PlaybackEngine) runVideo(ctx context.Context, path string, start time.D
 		return
 	}
 
+	frameBytes := vw * vh * 4
 	frameInterval := time.Duration(float64(time.Second) / (targetFPS * rate))
 	frameDuration := time.Duration(float64(time.Second) / targetFPS)
 
@@ -386,8 +427,8 @@ func (e *PlaybackEngine) runVideo(ctx context.Context, path string, start time.D
 
 			img := &image.RGBA{
 				Pix:    buf,
-				Stride: stageWidth * 4,
-				Rect:   image.Rect(0, 0, stageWidth, stageHeight),
+				Stride: vw * 4,
+				Rect:   image.Rect(0, 0, vw, vh),
 			}
 
 			if e.onFrame != nil {
@@ -421,7 +462,7 @@ func (e *PlaybackEngine) runFallback(ctx context.Context, path string, start tim
 			e.position = currentPos
 			e.mu.Unlock()
 
-			img := GenerateTestFrame(filepath.Base(path), currentPos, duration, stageWidth, stageHeight)
+			img := GenerateTestFrame(filepath.Base(path), currentPos, duration, defaultWidth, defaultHeight)
 			if e.onFrame != nil {
 				e.onFrame(img, currentPos)
 			}

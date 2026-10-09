@@ -16,7 +16,6 @@ import (
 	"github.com/egoist/mygo/ui"
 
 	"github.com/ZacharyZhang-NY/MujicaUI/core"
-	"github.com/ZacharyZhang-NY/MujicaUI/display"
 	"github.com/ZacharyZhang-NY/MujicaUI/icons"
 	"github.com/ZacharyZhang-NY/MujicaUI/input"
 	"github.com/ZacharyZhang-NY/MujicaUI/media"
@@ -24,65 +23,70 @@ import (
 	"github.com/ZacharyZhang-NY/MujicaUI/theme"
 )
 
-// SubtitleTrack represents one subtitle stream or file.
+// SubtitleTrack is one subtitle stream or sidecar file.
 type SubtitleTrack struct {
 	Name string
 	Cues []SubtitleCue
 }
 
 type app struct {
-	win          *mygo.Window
-	engine       *PlaybackEngine
-	frame        *ui.Bitmap
-	position     time.Duration
-	duration     time.Duration
-	playing      bool
-	rate         float64
-	volume       float64
-	muted        bool
-	subtitlesOn  bool
-	fullscreen   bool
-	pip          bool
-	loopMode     media.LoopMode
-	shuffle      bool
-	showDrawer   bool
-	info         *VideoInfo
-	playlist     []media.PlaylistItem
-	currentID    string
-	// Subtitle tracks (embedded + side-car files)
+	win    *mygo.Window
+	engine *PlaybackEngine
+
+	// Playback state
+	frame    *ui.Bitmap
+	position time.Duration
+	duration time.Duration
+	playing  bool
+	rate     float64
+	volume   float64
+	muted    bool
+
+	// Subtitle state
+	subtitlesOn    bool
 	subtitleTracks []SubtitleTrack
-	activeTrackIdx int // index into subtitleTracks; -1 = none selected
-	// File picking / drag-drop
-	pickedPaths  []string
+	activeTrackIdx int // -1 = none
+
+	// Window / UI state
+	fullscreen bool
+	pip        bool
+	loopMode   media.LoopMode
+	showPanel  bool // right-side panel (playlist + subtitles)
+	panelTab   int  // 0=playlist, 1=subtitles
+	darkMode   bool
+	statusMsg  string
+
+	// Current media
+	info      *VideoInfo
+	playlist  []media.PlaylistItem
+	currentID string
+
+	// Drag-drop
 	droppedFiles []input.DroppedFile
-	selectedTab  int
-	darkMode     bool
-	statusMsg    string
-	// Native menu items we need to update at runtime
-	menuSubtitlesItem *mygo.MenuItem
-	menuLoopItem      *mygo.MenuItem
+
+	// Live menu items
+	menuSubtitlesItem  *mygo.MenuItem
 	menuFullscreenItem *mygo.MenuItem
+	menuPanelItem      *mygo.MenuItem
+	menuLoopItem       *mygo.MenuItem
+	menuDarkItem       *mygo.MenuItem
 }
 
 func newApp() *app {
 	a := &app{
 		rate:           1.0,
 		volume:         0.8,
-		subtitlesOn:    false, // off until a real subtitle track is found
+		subtitlesOn:    false,
 		activeTrackIdx: -1,
-		showDrawer:     false,
+		showPanel:      false,
 		darkMode:       true,
-		statusMsg:      "Ready – use File > Open to load a video",
+		statusMsg:      "Open a video with File > Open… (Ctrl+O)",
 	}
-
 	a.engine = NewPlaybackEngine(
 		func(img image.Image, pos time.Duration) {
 			bm := ui.NewBitmap(img)
 			if a.win != nil {
-				a.win.Update(func() {
-					a.frame = bm
-					a.position = pos
-				})
+				a.win.Update(func() { a.frame = bm; a.position = pos })
 			} else {
 				a.frame = bm
 				a.position = pos
@@ -112,106 +116,75 @@ func (a *app) currentSubtitle() string {
 	return GetSubtitleAt(a.activeCues(), a.position)
 }
 
-// extractEmbeddedSubtitles uses ffmpeg to extract all soft subtitle streams
-// from the video file into in-memory SRT cues.
+// extractEmbeddedSubtitles uses ffmpeg to pull soft subtitle streams out of
+// the container into temporary SRT files, then parses them.
 func extractEmbeddedSubtitles(videoPath string) []SubtitleTrack {
-	// Ask ffprobe for the subtitle stream metadata
 	probe := exec.Command("ffprobe",
-		"-v", "quiet",
-		"-print_format", "json",
-		"-show_streams",
-		"-select_streams", "s",
+		"-v", "quiet", "-print_format", "json",
+		"-show_streams", "-select_streams", "s",
 		videoPath,
 	)
 	probe.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: 0x08000000}
 	out, err := probe.Output()
-
-	var tracks []SubtitleTrack
-	if err == nil && len(out) > 0 {
-		// Count subtitle streams by counting "codec_type":"subtitle"
-		idx := 0
-		for _, line := range strings.Split(string(out), "\n") {
-			line = strings.TrimSpace(line)
-			if strings.Contains(line, `"codec_type": "subtitle"`) || strings.Contains(line, `"codec_type":"subtitle"`) {
-				// Extract this stream as SRT via a temp file
-				tmpFile := filepath.Join(os.TempDir(), fmt.Sprintf("myvideo_sub_%d_%d.srt", time.Now().UnixNano(), idx))
-				cmd := exec.Command("ffmpeg",
-					"-y",
-					"-i", videoPath,
-					"-map", fmt.Sprintf("0:s:%d", idx),
-					"-f", "srt",
-					tmpFile,
-				)
-				cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: 0x08000000}
-				if err := cmd.Run(); err == nil {
-					cues, parseErr := ParseSRTFile(tmpFile)
-					_ = os.Remove(tmpFile)
-					if parseErr == nil && len(cues) > 0 {
-						name := fmt.Sprintf("Track %d", idx+1)
-						tracks = append(tracks, SubtitleTrack{Name: name, Cues: cues})
-					}
-				} else {
-					_ = os.Remove(tmpFile)
-				}
-				idx++
-			}
-		}
-	}
-	return tracks
-}
-
-// buildSubtitleTracks discovers subtitle tracks: first embedded streams,
-// then adjacent .srt/.vtt side-car files. Returns empty slice (not nil)
-// so the UI can show "No subtitles found" when empty.
-func buildSubtitleTracks(videoPath string) []SubtitleTrack {
-	var tracks []SubtitleTrack
-
-	// 1. Embedded (soft) subtitle streams
-	if videoPath != "" {
-		tracks = append(tracks, extractEmbeddedSubtitles(videoPath)...)
+	if err != nil || len(out) == 0 {
+		return nil
 	}
 
-	// 2. Side-car files adjacent to the video
-	if videoPath != "" {
-		base := videoPath[:len(videoPath)-len(filepath.Ext(videoPath))]
-		candidates := []string{
-			base + ".srt",
-			base + ".vtt",
-			base + ".en.srt",
-			base + ".eng.srt",
+	var tracks []SubtitleTrack
+	idx := 0
+	for _, line := range strings.Split(string(out), "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.Contains(line, `"codec_type"`) || !strings.Contains(line, `subtitle`) {
+			continue
 		}
-		seen := map[string]bool{}
-		for _, path := range candidates {
-			if seen[path] {
-				continue
-			}
-			seen[path] = true
-			cues, err := ParseSRTFile(path)
-			if err == nil && len(cues) > 0 {
+		tmp := filepath.Join(os.TempDir(),
+			fmt.Sprintf("myvideo_sub_%d_%d.srt", time.Now().UnixNano(), idx))
+		cmd := exec.Command("ffmpeg", "-y", "-i", videoPath,
+			"-map", fmt.Sprintf("0:s:%d", idx), "-f", "srt", tmp)
+		cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: 0x08000000}
+		if err := cmd.Run(); err == nil {
+			if cues, err := ParseSRTFile(tmp); err == nil && len(cues) > 0 {
 				tracks = append(tracks, SubtitleTrack{
-					Name: filepath.Base(path),
+					Name: fmt.Sprintf("Track %d", idx+1),
 					Cues: cues,
 				})
 			}
 		}
+		_ = os.Remove(tmp)
+		idx++
 	}
+	return tracks
+}
 
+// buildSubtitleTracks discovers embedded streams then sidecar files.
+// Never injects demo cues.
+func buildSubtitleTracks(videoPath string) []SubtitleTrack {
+	if videoPath == "" {
+		return nil
+	}
+	tracks := extractEmbeddedSubtitles(videoPath)
+
+	base := videoPath[:len(videoPath)-len(filepath.Ext(videoPath))]
+	for _, cand := range []string{base + ".srt", base + ".vtt", base + ".en.srt"} {
+		if cues, err := ParseSRTFile(cand); err == nil && len(cues) > 0 {
+			tracks = append(tracks, SubtitleTrack{Name: filepath.Base(cand), Cues: cues})
+		}
+	}
 	return tracks
 }
 
 // ── File loading ─────────────────────────────────────────────────────────────
 
-// openFileDialog opens the system file picker and loads the chosen video.
 func (a *app) openFileDialog() {
 	go func() {
 		paths, err := mygo.Dialog.Open(mygo.OpenDialogOptions{
 			Parent: a.win,
 			Title:  "Open Video File",
 			Filters: []mygo.FileFilter{
-				{Name: "Video Files", Extensions: []string{"mp4", "mkv", "webm", "avi", "mov", "wmv", "flv", "m4v", "ts", "mts"}},
+				{Name: "Video Files", Extensions: []string{
+					"mp4", "mkv", "webm", "avi", "mov", "wmv", "flv", "m4v", "ts", "mts"}},
 				{Name: "All Files", Extensions: []string{"*"}},
 			},
-			Multiple: false,
 		})
 		if err != nil || len(paths) == 0 {
 			return
@@ -225,29 +198,19 @@ func (a *app) loadFile(path string, autoplay bool) {
 		return
 	}
 	if a.win != nil {
-		a.win.Update(func() { a.statusMsg = "Loading: " + filepath.Base(path) })
+		a.win.Update(func() { a.statusMsg = "Loading " + filepath.Base(path) + "…" })
 	}
-
 	go func() {
 		info, err := ProbeVideo(path)
 		if err != nil {
-			info = &VideoInfo{
-				Path:     path,
-				Title:    filepath.Base(path),
-				Duration: 10 * time.Second,
-				Width:    640,
-				Height:   360,
-				FPS:      25,
-			}
+			info = &VideoInfo{Path: path, Title: filepath.Base(path),
+				Duration: 10 * time.Second, Width: 640, Height: 360, FPS: 25}
 		}
-
 		img, _ := ExtractSingleFrame(path, 0)
 		var bm *ui.Bitmap
 		if img != nil {
 			bm = ui.NewBitmap(img)
 		}
-
-		// Subtitle discovery (embedded + sidecar, NO demo cues)
 		tracks := buildSubtitleTracks(path)
 
 		apply := func() {
@@ -256,7 +219,6 @@ func (a *app) loadFile(path string, autoplay bool) {
 			a.position = 0
 			a.frame = bm
 			a.subtitleTracks = tracks
-			// Auto-select first track if available, else disable subtitles
 			if len(tracks) > 0 {
 				a.activeTrackIdx = 0
 				a.subtitlesOn = true
@@ -265,18 +227,16 @@ func (a *app) loadFile(path string, autoplay bool) {
 				a.subtitlesOn = false
 			}
 			a.currentID = path
-			a.statusMsg = "Loaded: " + info.Title
+			a.statusMsg = info.Title
 			if len(tracks) == 0 {
-				a.statusMsg += " (no subtitles)"
+				a.statusMsg += "  •  no subtitles"
 			}
 
-			// Update menu items
 			if a.menuSubtitlesItem != nil {
 				a.menuSubtitlesItem.SetEnabled(len(tracks) > 0)
 				a.menuSubtitlesItem.SetChecked(a.subtitlesOn)
 			}
 
-			// Add to playlist if not already present
 			found := false
 			for _, it := range a.playlist {
 				if it.ID == path {
@@ -288,19 +248,18 @@ func (a *app) loadFile(path string, autoplay bool) {
 				a.playlist = append(a.playlist, media.PlaylistItem{
 					ID:       path,
 					Title:    info.Title,
-					Subtitle: fmt.Sprintf("%dx%d • %s", info.Width, info.Height, core.MediaClock(info.Duration)),
+					Subtitle: fmt.Sprintf("%dx%d · %s", info.Width, info.Height, core.MediaClock(info.Duration)),
 					Duration: info.Duration,
 				})
 			}
-
 			a.engine.Load(path, info.Duration)
+			a.engine.SetResolution(info.Width, info.Height)
 			if autoplay {
 				a.onPlay()
 			} else {
 				a.playing = false
 			}
 		}
-
 		if a.win != nil {
 			a.win.Update(apply)
 		} else {
@@ -309,7 +268,7 @@ func (a *app) loadFile(path string, autoplay bool) {
 	}()
 }
 
-// ── Playback actions ─────────────────────────────────────────────────────────
+// ── Playback ──────────────────────────────────────────────────────────────────
 
 func (a *app) onPlay() {
 	if a.info == nil && len(a.playlist) > 0 {
@@ -320,13 +279,11 @@ func (a *app) onPlay() {
 	a.engine.Play()
 	a.statusMsg = "Playing"
 }
-
 func (a *app) onPause() {
 	a.playing = false
 	a.engine.Pause()
 	a.statusMsg = "Paused"
 }
-
 func (a *app) togglePlay() {
 	if a.playing {
 		a.onPause()
@@ -334,7 +291,6 @@ func (a *app) togglePlay() {
 		a.onPlay()
 	}
 }
-
 func (a *app) onSeek(pos time.Duration) {
 	if a.duration > 0 {
 		pos = min(max(0, pos), a.duration)
@@ -344,28 +300,19 @@ func (a *app) onSeek(pos time.Duration) {
 	a.position = pos
 	a.engine.Seek(pos)
 }
-
 func (a *app) onRate(r float64) {
 	if r <= 0 {
 		r = 1.0
 	}
 	a.rate = r
 	a.engine.SetRate(r)
-	a.statusMsg = fmt.Sprintf("Speed: %.2f×", r)
 }
-
 func (a *app) onSubtitles(on bool) {
 	a.subtitlesOn = on
 	if a.menuSubtitlesItem != nil {
 		a.menuSubtitlesItem.SetChecked(on)
 	}
-	if on {
-		a.statusMsg = "Subtitles On"
-	} else {
-		a.statusMsg = "Subtitles Off"
-	}
 }
-
 func (a *app) onFullscreen(on bool) {
 	a.fullscreen = on
 	if a.win != nil {
@@ -375,19 +322,12 @@ func (a *app) onFullscreen(on bool) {
 		a.menuFullscreenItem.SetChecked(on)
 	}
 }
-
 func (a *app) onPiP(on bool) {
 	a.pip = on
 	if a.win != nil {
 		a.win.SetAlwaysOnTop(on)
 	}
-	if on {
-		a.statusMsg = "Picture-in-Picture"
-	} else {
-		a.statusMsg = "PiP Off"
-	}
 }
-
 func (a *app) onPlaybackEnded() {
 	if a.loopMode == media.LoopOne {
 		a.onSeek(0)
@@ -407,9 +347,8 @@ func (a *app) onPlaybackEnded() {
 	}
 	a.playing = false
 	a.position = a.duration
-	a.statusMsg = "Playback ended"
+	a.statusMsg = "Finished"
 }
-
 func (a *app) playTrackByID(id string) {
 	for _, it := range a.playlist {
 		if it.ID == id {
@@ -418,11 +357,8 @@ func (a *app) playTrackByID(id string) {
 		}
 	}
 }
-
 func (a *app) removeTrackByID(id string) {
-	a.playlist = slices.DeleteFunc(a.playlist, func(it media.PlaylistItem) bool {
-		return it.ID == id
-	})
+	a.playlist = slices.DeleteFunc(a.playlist, func(it media.PlaylistItem) bool { return it.ID == id })
 	if a.currentID == id {
 		if len(a.playlist) > 0 {
 			a.playTrackByID(a.playlist[0].ID)
@@ -437,7 +373,6 @@ func (a *app) removeTrackByID(id string) {
 		}
 	}
 }
-
 func (a *app) nextTrack() {
 	if len(a.playlist) == 0 {
 		return
@@ -450,7 +385,6 @@ func (a *app) nextTrack() {
 	}
 	a.playTrackByID(a.playlist[0].ID)
 }
-
 func (a *app) prevTrack() {
 	if len(a.playlist) == 0 {
 		return
@@ -467,13 +401,9 @@ func (a *app) prevTrack() {
 // ── Native Menu Bar ───────────────────────────────────────────────────────────
 
 func (a *app) buildMenu() *mygo.Menu {
-	// Subtitle toggle (disabled until a video with subtitles is loaded)
 	subtitlesItem := &mygo.MenuItem{
-		ID:          "subtitles",
-		Label:       "Show Subtitles",
-		Type:        mygo.MenuItemCheckbox,
-		Accelerator: "CmdOrCtrl+T",
-		Disabled:    true, // enabled after load
+		ID: "subs", Label: "Show Subtitles", Type: mygo.MenuItemCheckbox,
+		Accelerator: "CmdOrCtrl+T", Disabled: true,
 		Click: func(it *mygo.MenuItem, win *mygo.Window) {
 			if win != nil {
 				win.Update(func() { a.onSubtitles(it.IsChecked()) })
@@ -483,10 +413,7 @@ func (a *app) buildMenu() *mygo.Menu {
 	a.menuSubtitlesItem = subtitlesItem
 
 	fullscreenItem := &mygo.MenuItem{
-		ID:          "fullscreen",
-		Label:       "Full Screen",
-		Type:        mygo.MenuItemCheckbox,
-		Accelerator: "F11",
+		ID: "fs", Label: "Full Screen", Type: mygo.MenuItemCheckbox, Accelerator: "F11",
 		Click: func(it *mygo.MenuItem, win *mygo.Window) {
 			if win != nil {
 				win.Update(func() { a.onFullscreen(it.IsChecked()) })
@@ -495,10 +422,19 @@ func (a *app) buildMenu() *mygo.Menu {
 	}
 	a.menuFullscreenItem = fullscreenItem
 
+	panelItem := &mygo.MenuItem{
+		ID: "panel", Label: "Show Side Panel", Type: mygo.MenuItemCheckbox,
+		Accelerator: "CmdOrCtrl+P",
+		Click: func(it *mygo.MenuItem, win *mygo.Window) {
+			if win != nil {
+				win.Update(func() { a.showPanel = it.IsChecked() })
+			}
+		},
+	}
+	a.menuPanelItem = panelItem
+
 	loopItem := &mygo.MenuItem{
-		ID:          "loop",
-		Label:       "Loop Playback",
-		Type:        mygo.MenuItemCheckbox,
+		ID: "loop", Label: "Loop Playback", Type: mygo.MenuItemCheckbox,
 		Accelerator: "CmdOrCtrl+L",
 		Click: func(it *mygo.MenuItem, _ *mygo.Window) {
 			if it.IsChecked() {
@@ -510,70 +446,108 @@ func (a *app) buildMenu() *mygo.Menu {
 	}
 	a.menuLoopItem = loopItem
 
+	darkItem := &mygo.MenuItem{
+		ID: "dark", Label: "Dark Mode", Type: mygo.MenuItemCheckbox, Checked: true,
+		Click: func(it *mygo.MenuItem, win *mygo.Window) {
+			if win != nil {
+				win.Update(func() { a.darkMode = it.IsChecked() })
+			}
+		},
+	}
+	a.menuDarkItem = darkItem
+
 	return mygo.NewMenu([]*mygo.MenuItem{
-		{
-			Label: "File",
-			Submenu: []*mygo.MenuItem{
-				{
-					ID:          "open",
-					Label:       "Open Video…",
-					Accelerator: "CmdOrCtrl+O",
-					Click: func(_ *mygo.MenuItem, _ *mygo.Window) {
-						a.openFileDialog()
-					},
-				},
-				mygo.Separator(),
-				{Role: mygo.RoleQuit},
-			},
-		},
-		{
-			Label: "Playback",
-			Submenu: []*mygo.MenuItem{
-				{
-					ID:          "playpause",
-					Label:       "Play / Pause",
-					Accelerator: "Space",
-					Click: func(_ *mygo.MenuItem, win *mygo.Window) {
-						if win != nil {
-							win.Update(func() { a.togglePlay() })
-						}
-					},
-				},
-				{
-					Label:       "Seek Back 5s",
-					Accelerator: "Left",
-					Click: func(_ *mygo.MenuItem, win *mygo.Window) {
-						if win != nil {
-							win.Update(func() { a.onSeek(a.position - 5*time.Second) })
-						}
-					},
-				},
-				{
-					Label:       "Seek Forward 5s",
-					Accelerator: "Right",
-					Click: func(_ *mygo.MenuItem, win *mygo.Window) {
-						if win != nil {
-							win.Update(func() { a.onSeek(a.position + 5*time.Second) })
-						}
-					},
-				},
-				mygo.Separator(),
-				loopItem,
-			},
-		},
-		{
-			Label: "View",
-			Submenu: []*mygo.MenuItem{
-				subtitlesItem,
-				mygo.Separator(),
-				fullscreenItem,
-				{Role: mygo.RoleToggleFullScreen},
-			},
-		},
+		{Label: "File", Submenu: []*mygo.MenuItem{
+			{Label: "Open Video…", Accelerator: "CmdOrCtrl+O",
+				Click: func(_ *mygo.MenuItem, _ *mygo.Window) { a.openFileDialog() }},
+			mygo.Separator(),
+			{Label: "Show Playlist", Type: mygo.MenuItemCheckbox, Accelerator: "CmdOrCtrl+1",
+				Click: func(it *mygo.MenuItem, win *mygo.Window) {
+					if win != nil {
+						win.Update(func() {
+							a.showPanel = it.IsChecked()
+							a.panelTab = 0
+							if a.menuPanelItem != nil {
+								a.menuPanelItem.SetChecked(a.showPanel)
+							}
+						})
+					}
+				}},
+			{Label: "Show Subtitles Panel", Type: mygo.MenuItemCheckbox, Accelerator: "CmdOrCtrl+2",
+				Click: func(it *mygo.MenuItem, win *mygo.Window) {
+					if win != nil {
+						win.Update(func() {
+							a.showPanel = it.IsChecked()
+							a.panelTab = 1
+							if a.menuPanelItem != nil {
+								a.menuPanelItem.SetChecked(a.showPanel)
+							}
+						})
+					}
+				}},
+			{Label: "Show Drop Zone", Type: mygo.MenuItemCheckbox, Accelerator: "CmdOrCtrl+3",
+				Click: func(it *mygo.MenuItem, win *mygo.Window) {
+					if win != nil {
+						win.Update(func() {
+							a.showPanel = it.IsChecked()
+							a.panelTab = 2
+							if a.menuPanelItem != nil {
+								a.menuPanelItem.SetChecked(a.showPanel)
+							}
+						})
+					}
+				}},
+			mygo.Separator(),
+			{Role: mygo.RoleQuit},
+		}},
+		{Label: "Playback", Submenu: []*mygo.MenuItem{
+			{Label: "Play / Pause", Accelerator: "Space",
+				Click: func(_ *mygo.MenuItem, win *mygo.Window) {
+					if win != nil {
+						win.Update(func() { a.togglePlay() })
+					}
+				}},
+			{Label: "Seek Back 5 s", Accelerator: "Left",
+				Click: func(_ *mygo.MenuItem, win *mygo.Window) {
+					if win != nil {
+						win.Update(func() { a.onSeek(a.position - 5*time.Second) })
+					}
+				}},
+			{Label: "Seek Forward 5 s", Accelerator: "Right",
+				Click: func(_ *mygo.MenuItem, win *mygo.Window) {
+					if win != nil {
+						win.Update(func() { a.onSeek(a.position + 5*time.Second) })
+					}
+				}},
+			{Label: "Previous Track", Accelerator: "CmdOrCtrl+Left",
+				Click: func(_ *mygo.MenuItem, win *mygo.Window) {
+					if win != nil {
+						win.Update(func() { a.prevTrack() })
+					}
+				}},
+			{Label: "Next Track", Accelerator: "CmdOrCtrl+Right",
+				Click: func(_ *mygo.MenuItem, win *mygo.Window) {
+					if win != nil {
+						win.Update(func() { a.nextTrack() })
+					}
+				}},
+			mygo.Separator(),
+			loopItem,
+		}},
+		{Label: "View", Submenu: []*mygo.MenuItem{
+			subtitlesItem,
+			mygo.Separator(),
+			panelItem,
+			mygo.Separator(),
+			fullscreenItem,
+			{Role: mygo.RoleToggleFullScreen},
+			mygo.Separator(),
+			darkItem,
+		}},
 	})
 }
 
-// ── Main view ────────────────────────────────────────────────────────────────
+// ── Main view ─────────────────────────────────────────────────────────────────
 
 func (a *app) view(c *ui.Context) {
 	mode := core.Dark
@@ -586,105 +560,54 @@ func (a *app) view(c *ui.Context) {
 	d := core.Density(c)
 	u := d.Unit()
 
-	// Root column — fills the entire native window
-	ui.Column(c).Fill().Background(k.Background).
-		Padding(u, u*2, u, u*2).Gap(u).Children(func() {
+	// Root: full-window column, no padding — VLC style
+	ui.Column(c).Fill().Background(ui.Hex("#0B0A0B")).Gap(0).Children(func() {
 
-		// ── 1. Compact Header ─────────────────────────────────────────
-		a.viewHeader(c, k, u)
+		// ── Middle: video + optional side panel ─────────────────────────
+		ui.Row(c).Grow(1).FillWidth().Gap(0).Children(func() {
+			// Video stage
+			a.viewStage(c, k, u)
+			// Side panel (appears to the right, never overlaps video)
+			if a.showPanel {
+				a.viewPanel(c, k, u)
+			}
+		})
 
-		// ── 2. Video Stage (grows to fill remaining space) ─────────────
-		a.viewStage(c, k, u)
-
-		// ── 3. Progress Scrubber ───────────────────────────────────────
-		a.viewScrubber(c, u)
-
-		// ── 4. Compact Controls Bar ────────────────────────────────────
-		a.viewControls(c, k, u)
-
-		// ── 5. Collapsible Drawer ──────────────────────────────────────
-		if a.showDrawer {
-			a.viewDrawer(c, k, u)
-		}
-	})
-}
-
-func (a *app) viewHeader(c *ui.Context, k theme.Tokens, u float32) {
-	ui.Row(c).FillWidth().AlignItems(ui.Center).Gap(u).
-		Background(k.Surface).Radius(theme.ControlRadius).
-		Border(theme.BorderWidth, k.Border).
-		Padding(u*0.5, u*2, u*0.5, u*2).Children(func() {
-
-		ui.Icon(c, core.MediaPlay).Size(16, 16).TextColor(k.Accent)
-		ui.Text(c, "MyGo Player").
-			FontSize(core.FontSize(c, theme.BodySize)).Bold().TextColor(k.Text)
-
-		// Current file badge
-		if a.info != nil {
-			display.Badge(c, display.BadgeOptions{
-				Text:     a.info.Title,
-				Tone:     display.BadgeNeutral,
-				Position: display.BadgeInline,
-			}, nil)
-		}
-
-		ui.Box(c).Grow(1)
-
-		// Open file (uses system dialog — see also File menu)
-		if core.IconAction(c, icons.Must("folder"), "Open File (Ctrl+O)").Clicked() {
-			a.openFileDialog()
-		}
-
-		// Drawer toggle
-		drawerIcon := icons.Must("panel-left")
-		if input.Button(c, fmt.Sprintf("(%d)", len(a.playlist)), input.ButtonOptions{
-			Variant: func() input.ButtonVariant {
-				if a.showDrawer {
-					return input.Secondary
+		// ── Scrubber ────────────────────────────────────────────────────
+		ui.Box(c).FillWidth().Padding(0, u, 0, u).Children(func() {
+			if a.duration > 0 {
+				pos := min(max(0, a.position), a.duration)
+				if media.VideoScrubber(c, &pos, media.VideoScrubberOptions{
+					Duration: a.duration,
+				}).Changed() {
+					a.onSeek(pos)
 				}
-				return input.Ghost
-			}(),
-			Icon: drawerIcon,
-		}).Clicked() {
-			a.showDrawer = !a.showDrawer
-		}
+			}
+		})
 
-		// Theme toggle
-		themeIcon := icons.Must("sun")
-		if !a.darkMode {
-			themeIcon = icons.Must("moon")
-		}
-		if core.IconAction(c, themeIcon, "Toggle Theme").Clicked() {
-			a.darkMode = !a.darkMode
-		}
+		// ── Controls bar ────────────────────────────────────────────────
+		a.viewControls(c, k, u)
 	})
 }
 
+// viewStage: focusable video canvas, fills all remaining space.
 func (a *app) viewStage(c *ui.Context, k theme.Tokens, u float32) {
 	stage := ui.Box(c).Grow(1).FillWidth().
-		Background(ui.Hex("#0B0A0B")).
-		Radius(theme.CardRadius).
-		Border(theme.BorderWidth, k.Border).
-		Center().Focusable().
-		Role(ui.RoleImage).Label("Video Player Stage")
+		Background(ui.Hex("#0B0A0B")).Center().Focusable().
+		Role(ui.RoleImage).Label("Video Stage")
 
-	// Keyboard shortcuts on focused stage
-	if stage.Shortcut(0, ui.KeySpace) || stage.Shortcut(0, ui.KeyK) {
+	// Keyboard shortcuts
+	switch {
+	case stage.Shortcut(0, ui.KeySpace), stage.Shortcut(0, ui.KeyK):
 		a.togglePlay()
-	}
-	if stage.Shortcut(0, ui.KeyLeft) {
+	case stage.Shortcut(0, ui.KeyLeft):
 		a.onSeek(a.position - 5*time.Second)
-	}
-	if stage.Shortcut(0, ui.KeyRight) {
+	case stage.Shortcut(0, ui.KeyRight):
 		a.onSeek(a.position + 5*time.Second)
-	}
-	if stage.Shortcut(0, ui.KeyF) {
+	case stage.Shortcut(0, ui.KeyF):
 		a.onFullscreen(!a.fullscreen)
-	}
-	if stage.Shortcut(0, ui.KeyC) {
-		if len(a.subtitleTracks) > 0 {
-			a.onSubtitles(!a.subtitlesOn)
-		}
+	case stage.Shortcut(0, ui.KeyC) && len(a.subtitleTracks) > 0:
+		a.onSubtitles(!a.subtitlesOn)
 	}
 	if stage.Clicked() {
 		a.togglePlay()
@@ -692,100 +615,105 @@ func (a *app) viewStage(c *ui.Context, k theme.Tokens, u float32) {
 
 	stage.Children(func() {
 		if a.frame == nil {
+			// Empty state — VLC-style dark placeholder
 			ui.Column(c).Center().Gap(u * 2).Children(func() {
-				ui.Icon(c, core.MediaRect).Size(52, 52).TextColor(k.TextMuted)
-				ui.Text(c, "No video loaded").
-					TextColor(k.Text).FontSize(core.FontSize(c, theme.H3Size)).Bold()
-				ui.Text(c, "File > Open Video… (Ctrl+O) or drag & drop a file").
-					TextColor(k.TextMuted).FontSize(core.FontSize(c, theme.BodySize))
+				ui.Icon(c, core.MediaRect).Size(64, 64).TextColor(ui.Hex("#3A3A3A"))
+				ui.Text(c, "No media loaded").
+					TextColor(ui.Hex("#5A5A5A")).FontSize(core.FontSize(c, theme.H3Size))
+				ui.Text(c, "File > Open Video… or Ctrl+O").
+					TextColor(ui.Hex("#3A3A3A")).FontSize(core.FontSize(c, theme.BodySize))
 			})
 		} else {
+			// Video frame — Contain = letterbox, preserves aspect ratio
 			ui.Image(c, a.frame).Fit(ui.Contain).Fill()
 		}
 
 		// Subtitle overlay
-		sub := a.currentSubtitle()
-		if a.subtitlesOn && sub != "" {
-			ui.Box(c).Absolute().Left(0).Right(0).Bottom(u * 2).
+		if sub := a.currentSubtitle(); a.subtitlesOn && sub != "" {
+			ui.Box(c).Absolute().Left(0).Right(0).Bottom(u * 3).
 				Center().PassThrough().Children(func() {
 				ui.Text(c, sub).
-					TextColor(ui.Hex("#F2EBDD")).
-					Background(ui.RGBA(0, 0, 0, 0.78)).
+					TextColor(ui.Hex("#FFFFFF")).
+					Background(ui.RGBA(0, 0, 0, 0.8)).
 					Padding(u*0.5, u*2, u*0.5, u*2).
-					Radius(theme.ControlRadius).
-					TextAlign(ui.Center).MaxLines(3).
+					Radius(4).TextAlign(ui.Center).MaxLines(4).
 					FontSize(core.FontSize(c, theme.BodySize))
 			})
 		}
 	})
 }
 
-func (a *app) viewScrubber(c *ui.Context, u float32) {
-	if a.duration > 0 {
-		pos := min(max(0, a.position), a.duration)
-		if media.VideoScrubber(c, &pos, media.VideoScrubberOptions{
-			Duration: a.duration,
-		}).Changed() {
-			a.onSeek(pos)
-		}
-	}
-}
-
+// viewControls: single compact row — all icon buttons, never wraps.
 func (a *app) viewControls(c *ui.Context, k theme.Tokens, u float32) {
-	// Single compact row — smaller padding than before
-	ui.Row(c).FillWidth().AlignItems(ui.Center).Gap(u).
-		Background(k.Surface).Radius(theme.ControlRadius).
-		Border(theme.BorderWidth, k.Border).
-		Padding(u*0.5, u*2, u*0.5, u*2).Children(func() {
+	bg := ui.Hex("#161616")
+	if !a.darkMode {
+		bg = k.Surface
+	}
 
-		// Prev / Next (only when playlist has more than one)
+	// Single compact controls row
+	ui.Row(c).FillWidth().AlignItems(ui.Center).Gap(u*0.5).
+		Background(bg).
+		Padding(u*0.5, u, u*0.5, u).Children(func() {
+
+		// ── Left cluster: transport controls ───────────────────────────
 		if len(a.playlist) > 1 {
-			if core.IconAction(c, core.MediaPrev, "Previous Track").Clicked() {
+			if core.IconAction(c, core.MediaPrev, "Previous (Ctrl+←)").Clicked() {
 				a.prevTrack()
 			}
 		}
-
-		// Seek back 5 s
-		if core.IconAction(c, core.MediaRotateLeft, "–5 s").Clicked() {
+		if core.IconAction(c, core.MediaRotateLeft, "Back 5 s (←)").Clicked() {
 			a.onSeek(a.position - 5*time.Second)
 		}
 
-		// Play / Pause  (prominent)
+		// Play / Pause button — slightly larger, primary colour
 		playIcon := core.MediaPlay
-		playLabel := "Play"
 		if a.playing {
 			playIcon = core.MediaPause
-			playLabel = "Pause"
 		}
-		if input.Button(c, "", input.ButtonOptions{
-			Variant: input.Primary,
-			Icon:    playIcon,
-			Label:   playLabel,
-		}).Clicked() {
+		b := core.IconAction(c, playIcon, "Play/Pause (Space)")
+		b.Background(k.Accent).TextColor(k.AccentText).Radius(99).Width(32).Height(32)
+		if b.Clicked() {
 			a.togglePlay()
 		}
 
-		// Seek forward 5 s
-		if core.IconAction(c, core.MediaRotate, "+5 s").Clicked() {
+		if core.IconAction(c, core.MediaRotate, "Forward 5 s (→)").Clicked() {
 			a.onSeek(a.position + 5*time.Second)
 		}
-
 		if len(a.playlist) > 1 {
-			if core.IconAction(c, core.MediaNext, "Next Track").Clicked() {
+			if core.IconAction(c, core.MediaNext, "Next (Ctrl+→)").Clicked() {
 				a.nextTrack()
 			}
 		}
 
-		// Time clock
+		// ── Time ───────────────────────────────────────────────────────
 		ui.Text(c, core.MediaClock(a.position)+" / "+core.MediaClock(a.duration)).
 			FontSize(core.FontSize(c, theme.CaptionSize)).
-			TextColor(k.TextMuted).FontFeatures("tnum").SingleLine()
+			TextColor(ui.Hex("#888888")).FontFeatures("tnum").SingleLine()
 
+		// ── Spacer ─────────────────────────────────────────────────────
 		ui.Box(c).Grow(1)
 
-		// Volume
-		volRes := media.VolumeControl(c, &a.volume, &a.muted, media.VolumeControlOptions{})
-		if volRes.Changed() {
+		// ── Volume: manual mute icon + slider in the same row ─────────
+		// Using raw Slider with ShowValue:false avoids the tooltip bubble
+		// that inflates element height and misaligns siblings.
+		muteIcon := core.MediaVolume
+		if a.muted || a.volume == 0 {
+			muteIcon = core.MediaMute
+		}
+		if core.IconAction(c, muteIcon, "Mute (M)").Clicked() {
+			a.muted = !a.muted
+			a.engine.SetVolume(a.volume, a.muted)
+		}
+		volSlider := input.Slider(c, &a.volume, input.SliderOptions{
+			Min: 0, Max: 1, Step: 0.05,
+			ShowValue: false,
+			Label:     "Volume",
+		})
+		volSlider.Element.Width(90)
+		if volSlider.Changed() {
+			if a.muted && a.volume > 0 {
+				a.muted = false
+			}
 			a.engine.SetVolume(a.volume, a.muted)
 		}
 
@@ -798,7 +726,7 @@ func (a *app) viewControls(c *ui.Context, k theme.Tokens, u float32) {
 			a.onRate(rate)
 		}
 
-		// Subtitles CC (only when subtitles are available)
+		// Subtitles CC — only when tracks exist
 		if len(a.subtitleTracks) > 0 {
 			ccBtn := media.MediaToggleAction(c, core.MediaCaptions, "Subtitles (C)", a.subtitlesOn)
 			if ccBtn.Clicked() {
@@ -806,13 +734,12 @@ func (a *app) viewControls(c *ui.Context, k theme.Tokens, u float32) {
 			}
 		}
 
-		// Loop
-		loopOn := a.loopMode != media.LoopOff
+		// Loop (cycles: off → all → one)
 		loopIcon := core.MediaRepeat
 		if a.loopMode == media.LoopOne {
 			loopIcon = core.MediaRepeatOne
 		}
-		loopBtn := media.MediaToggleAction(c, loopIcon, "Loop", loopOn)
+		loopBtn := media.MediaToggleAction(c, loopIcon, "Loop", a.loopMode != media.LoopOff)
 		if loopBtn.Clicked() {
 			switch a.loopMode {
 			case media.LoopOff:
@@ -833,60 +760,68 @@ func (a *app) viewControls(c *ui.Context, k theme.Tokens, u float32) {
 			a.onPiP(!a.pip)
 		}
 
+		// Side panel toggle
+		panelBtn := media.MediaToggleAction(c, icons.Must("panel-left"), "Side Panel (Ctrl+P)", a.showPanel)
+		if panelBtn.Clicked() {
+			a.showPanel = !a.showPanel
+			if a.menuPanelItem != nil {
+				a.menuPanelItem.SetChecked(a.showPanel)
+			}
+		}
+
 		// Fullscreen
-		fsBtn := media.MediaToggleAction(c, core.MediaFullscreen, "Fullscreen (F)", a.fullscreen)
+		fsBtn := media.MediaToggleAction(c, core.MediaFullscreen, "Fullscreen (F / F11)", a.fullscreen)
 		if fsBtn.Clicked() {
 			a.onFullscreen(!a.fullscreen)
 		}
 	})
 }
 
-func (a *app) viewDrawer(c *ui.Context, k theme.Tokens, u float32) {
-	// Fixed height drawer — small enough not to push content off screen
-	ui.Column(c).FillWidth().Height(180).
-		Background(k.Surface).Radius(theme.CardRadius).
+// viewPanel: right-side panel (playlist + subtitles), fixed 260 px wide.
+// Never overlaps the controls bar because it sits in the middle Row, not below it.
+func (a *app) viewPanel(c *ui.Context, k theme.Tokens, u float32) {
+	panelBg := ui.Hex("#111111")
+	if !a.darkMode {
+		panelBg = k.Surface
+	}
+
+	ui.Column(c).Width(260).FillHeight().
+		Background(panelBg).
 		Border(theme.BorderWidth, k.Border).
-		Padding(u*0.5, u, u*0.5, u).Children(func() {
+		Padding(0).Gap(0).Children(func() {
 
 		tabs := []navigation.Tab{
-			{
-				Label: fmt.Sprintf("Playlist (%d)", len(a.playlist)),
-				Icon:  icons.Must("list"),
-				Panel: func() { a.viewPlaylistTab(c, u) },
-			},
-			{
-				Label: fmt.Sprintf("Subtitles (%d)", len(a.subtitleTracks)),
-				Icon:  core.MediaCaptions,
-				Panel: func() { a.viewSubtitlesTab(c, k, u) },
-			},
-			{
-				Label: "Drop Zone",
-				Icon:  icons.Must("upload"),
-				Panel: func() { a.viewDropZoneTab(c, k, u) },
-			},
-			{
-				Label: "Video Details",
-				Icon:  icons.Must("info"),
-				Panel: func() { a.viewInfoTab(c, k, u) },
-			},
+			{Label: " ", Icon: icons.Must("list"),   Panel: func() { a.viewPanelPlaylist(c, k, u) }},
+			{Label: " ", Icon: core.MediaCaptions,   Panel: func() { a.viewPanelSubtitles(c, k, u) }},
+			{Label: " ", Icon: icons.Must("upload"),  Panel: func() { a.viewPanelDrop(c, k, u) }},
 		}
-		navigation.Tabs(c, &a.selectedTab, tabs, navigation.TabsOptions{Label: "Drawer Tabs"})
+		navigation.Tabs(c, &a.panelTab, tabs, navigation.TabsOptions{Label: "Side Panel"})
 	})
 }
 
-// ── Drawer Tabs ──────────────────────────────────────────────────────────────
+func (a *app) viewPanelPlaylist(c *ui.Context, k theme.Tokens, u float32) {
+	ui.Column(c).Grow(1).Padding(u).Gap(u * 0.5).Children(func() {
 
-func (a *app) viewPlaylistTab(c *ui.Context, u float32) {
-	k := core.Tokens(c)
-	ui.Column(c).Gap(u * 0.5).Padding(u * 0.5).Children(func() {
+		// Section header with icon
+		ui.Row(c).FillWidth().AlignItems(ui.Center).Gap(u*0.5).
+			Padding(0, 0, u*0.5, 0).Children(func() {
+			ui.Icon(c, icons.Must("list")).Size(14, 14).TextColor(k.Accent)
+			ui.Text(c, fmt.Sprintf("Playlist  ·  %d items", len(a.playlist))).
+				Bold().FontSize(core.FontSize(c, theme.CaptionSize)).TextColor(k.Text)
+		})
+
 		if len(a.playlist) == 0 {
-			ui.Text(c, "No videos yet – use File > Open or drop files here.").
-				TextColor(k.TextMuted).FontSize(core.FontSize(c, theme.CaptionSize))
+			ui.Column(c).Grow(1).Center().Gap(u).Children(func() {
+				ui.Icon(c, icons.Must("list")).Size(32, 32).TextColor(k.TextMuted)
+				ui.Text(c, "Playlist is empty").
+					TextColor(k.TextMuted).FontSize(core.FontSize(c, theme.CaptionSize))
+				ui.Text(c, "Open File > Open Video… or drop files here").
+					TextColor(k.TextMuted).FontSize(core.FontSize(c, theme.CaptionSize))
+			})
 			return
 		}
 		res := media.Playlist(c, &a.playlist, media.PlaylistOptions{
 			Current: a.currentID,
-			Height:  115,
 		})
 		if res.Played != "" {
 			a.playTrackByID(res.Played)
@@ -897,53 +832,68 @@ func (a *app) viewPlaylistTab(c *ui.Context, u float32) {
 	})
 }
 
-func (a *app) viewSubtitlesTab(c *ui.Context, k theme.Tokens, u float32) {
-	ui.Column(c).Gap(u * 0.5).Padding(u * 0.5).Children(func() {
+func (a *app) viewPanelSubtitles(c *ui.Context, k theme.Tokens, u float32) {
+	ui.Column(c).Grow(1).Padding(u).Gap(u * 0.5).Children(func() {
+
+		// Section header with icon
+		ui.Row(c).FillWidth().AlignItems(ui.Center).Gap(u*0.5).
+			Padding(0, 0, u*0.5, 0).Children(func() {
+			ui.Icon(c, core.MediaCaptions).Size(14, 14).TextColor(k.Accent)
+			nTracks := len(a.subtitleTracks)
+			label := "No subtitles"
+			if nTracks == 1 {
+				label = "1 subtitle track"
+			}
+			if nTracks > 1 {
+				label = fmt.Sprintf("%d subtitle tracks", nTracks)
+			}
+			ui.Text(c, label).Bold().
+				FontSize(core.FontSize(c, theme.CaptionSize)).TextColor(k.Text)
+		})
 
 		if len(a.subtitleTracks) == 0 {
-			ui.Text(c, "No subtitles found in this video (no embedded streams or sidecar .srt/.vtt files).").
-				TextColor(k.TextMuted).FontSize(core.FontSize(c, theme.CaptionSize))
+			ui.Column(c).Grow(1).Center().Gap(u).Children(func() {
+				ui.Icon(c, core.MediaCaptions).Size(32, 32).TextColor(k.TextMuted)
+				ui.Text(c, "No subtitles detected").
+					TextColor(k.TextMuted).FontSize(core.FontSize(c, theme.BodySize))
+				ui.Text(c, "Embedded streams and .srt/.vtt\nfiles are auto-detected.").
+					TextColor(k.TextMuted).FontSize(core.FontSize(c, theme.CaptionSize)).
+					TextAlign(ui.Center)
+			})
 			return
 		}
 
-		// Track selector row
-		ui.Row(c).FillWidth().AlignItems(ui.Center).Gap(u).Children(func() {
-			ui.Text(c, "Track:").FontSize(core.FontSize(c, theme.CaptionSize)).TextColor(k.TextMuted)
-
-			// "Off"
-			offVar := input.Ghost
+		// Track picker
+		ui.Row(c).FillWidth().AlignItems(ui.Center).Gap(u * 0.5).Children(func() {
+			ui.Text(c, "Track:").TextColor(k.TextMuted).
+				FontSize(core.FontSize(c, theme.CaptionSize))
+			offV := input.Ghost
 			if !a.subtitlesOn {
-				offVar = input.Secondary
+				offV = input.Secondary
 			}
-			if input.Button(c, "Off", input.ButtonOptions{Variant: offVar}).Clicked() {
+			if input.Button(c, "Off", input.ButtonOptions{Variant: offV}).Clicked() {
 				a.onSubtitles(false)
 			}
-
-			// One button per track
 			for i, tr := range a.subtitleTracks {
-				idx := i
-				trName := tr.Name
-				variant := input.Ghost
+				idx, name := i, tr.Name
+				v := input.Ghost
 				if a.subtitlesOn && a.activeTrackIdx == idx {
-					variant = input.Primary
+					v = input.Primary
 				}
-				if input.Button(c, trName, input.ButtonOptions{Variant: variant}).Clicked() {
+				if input.Button(c, name, input.ButtonOptions{Variant: v}).Clicked() {
 					a.activeTrackIdx = idx
-					a.subtitlesOn = true
-					a.statusMsg = "Subtitles: " + trName
-					if a.menuSubtitlesItem != nil {
-						a.menuSubtitlesItem.SetChecked(true)
-					}
+					a.onSubtitles(true)
+					a.statusMsg = "Subtitles: " + name
 				}
 			}
 		})
 
-		// Cue list (compact scroll)
+		// Cue list
 		cues := a.activeCues()
 		if len(cues) == 0 {
 			return
 		}
-		ui.Scroll(c).MaxHeight(90).Children(func() {
+		ui.Scroll(c).Grow(1).Children(func() {
 			ui.Column(c).Gap(u * 0.5).Children(func() {
 				for _, cue := range cues {
 					cueCopy := cue
@@ -952,13 +902,16 @@ func (a *app) viewSubtitlesTab(c *ui.Context, k theme.Tokens, u float32) {
 					if isCurrent {
 						textColor = k.Accent
 					}
-					ui.Row(c).Gap(u).AlignItems(ui.Center).Children(func() {
-						ts := fmt.Sprintf("%s–%s", core.MediaClock(cueCopy.Start), core.MediaClock(cueCopy.End))
+					ui.Row(c).Gap(u * 0.5).AlignItems(ui.Center).Children(func() {
+						if isCurrent {
+							ui.Icon(c, core.MediaCaptions).Size(10, 10).TextColor(k.Accent)
+						}
+						ts := core.MediaClock(cueCopy.Start)
 						if input.Button(c, ts, input.ButtonOptions{Variant: input.Ghost}).Clicked() {
 							a.onSeek(cueCopy.Start)
 						}
 						ui.Text(c, cueCopy.Text).TextColor(textColor).
-							FontSize(core.FontSize(c, theme.CaptionSize)).SingleLine()
+							FontSize(core.FontSize(c, theme.CaptionSize))
 					})
 				}
 			})
@@ -966,54 +919,51 @@ func (a *app) viewSubtitlesTab(c *ui.Context, k theme.Tokens, u float32) {
 	})
 }
 
-func (a *app) viewDropZoneTab(c *ui.Context, k theme.Tokens, u float32) {
-	ui.Column(c).Padding(u * 0.5).Gap(u * 0.5).Children(func() {
-		ui.Text(c, "Drop videos here to add to playlist:").
-			FontSize(core.FontSize(c, theme.CaptionSize)).TextColor(k.TextMuted)
+func (a *app) viewPanelDrop(c *ui.Context, k theme.Tokens, u float32) {
+	ui.Column(c).Grow(1).Padding(u).Gap(u * 0.5).Children(func() {
+
+		// Section header with icon
+		ui.Row(c).FillWidth().AlignItems(ui.Center).Gap(u*0.5).
+			Padding(0, 0, u*0.5, 0).Children(func() {
+			ui.Icon(c, icons.Must("upload")).Size(14, 14).TextColor(k.Accent)
+			ui.Text(c, "Drop Zone").Bold().
+				FontSize(core.FontSize(c, theme.CaptionSize)).TextColor(k.Text)
+		})
 
 		prevLen := len(a.droppedFiles)
-		// Compact drop zone — MaxHeight limits its size so it doesn't fill the drawer
-		ui.Box(c).FillWidth().MaxHeight(90).Children(func() {
-			zoneRes := input.FileDropZone(c, &a.droppedFiles, input.FileDropZoneOptions{
-				Extensions: []string{"mp4", "mkv", "webm", "avi", "mov", "wmv", "flv", "m4v", "ts", "mts"},
-				Hint:       "Drop video files here",
-			})
-			if zoneRes.Changed() && len(a.droppedFiles) > prevLen {
-				for i := prevLen; i < len(a.droppedFiles); i++ {
-					f := a.droppedFiles[i]
-					a.loadFile(f.Path, i == prevLen)
-				}
-			}
+		zoneRes := input.FileDropZone(c, &a.droppedFiles, input.FileDropZoneOptions{
+			Extensions: []string{"mp4", "mkv", "webm", "avi", "mov", "wmv", "flv", "m4v", "ts"},
+			Hint:       "Drop videos here",
 		})
-	})
-}
-
-func (a *app) viewInfoTab(c *ui.Context, k theme.Tokens, u float32) {
-	ui.Column(c).Padding(u * 0.5).Gap(u * 0.5).Children(func() {
-		if a.info == nil {
-			ui.Text(c, "No video loaded.").TextColor(k.TextMuted).
-				FontSize(core.FontSize(c, theme.CaptionSize))
-			return
+		if zoneRes.Changed() && len(a.droppedFiles) > prevLen {
+			for i := prevLen; i < len(a.droppedFiles); i++ {
+				a.loadFile(a.droppedFiles[i].Path, i == prevLen)
+			}
 		}
-		ui.Row(c).Gap(u * 3).AlignItems(ui.Start).Children(func() {
+
+		// Info section
+		if a.info != nil {
+			ui.Box(c).FillWidth().Height(1).Background(k.Border)
+			ui.Row(c).AlignItems(ui.Center).Gap(u * 0.5).Children(func() {
+				ui.Icon(c, core.MediaRect).Size(14, 14).TextColor(k.Accent)
+				ui.Text(c, "Now Playing").Bold().
+					FontSize(core.FontSize(c, theme.CaptionSize)).TextColor(k.Text)
+			})
 			ui.Column(c).Gap(u * 0.5).Children(func() {
-				ui.Text(c, a.info.Title).Bold().FontSize(core.FontSize(c, theme.BodySize))
-				ui.Text(c, a.info.Path).TextColor(k.TextMuted).
-					FontSize(core.FontSize(c, theme.CaptionSize))
+				ui.Text(c, a.info.Title).Bold().
+					FontSize(core.FontSize(c, theme.BodySize)).TextColor(k.Text)
+				ui.Text(c, fmt.Sprintf("%dx%d  ·  %.0f fps  ·  %s / %s",
+					a.info.Width, a.info.Height, a.info.FPS,
+					a.info.VideoCodec, a.info.AudioCodec)).
+					TextColor(k.TextMuted).FontSize(core.FontSize(c, theme.CaptionSize))
 				if a.info.FileSize > 0 {
-					ui.Text(c, fmt.Sprintf("%.2f MB", float64(a.info.FileSize)/(1024*1024))).
+					ui.Text(c, fmt.Sprintf("%.1f MB  ·  %s",
+						float64(a.info.FileSize)/(1024*1024),
+						core.MediaClock(a.info.Duration))).
 						TextColor(k.TextMuted).FontSize(core.FontSize(c, theme.CaptionSize))
 				}
 			})
-			ui.Column(c).Gap(u * 0.5).Children(func() {
-				ui.Text(c, fmt.Sprintf("%d×%d", a.info.Width, a.info.Height)).Bold().
-					FontSize(core.FontSize(c, theme.BodySize))
-				ui.Text(c, fmt.Sprintf("%.2f fps  •  %s", a.info.FPS, core.MediaClock(a.info.Duration))).
-					TextColor(k.TextMuted).FontSize(core.FontSize(c, theme.CaptionSize))
-				ui.Text(c, a.info.VideoCodec+" / "+a.info.AudioCodec).
-					TextColor(k.TextMuted).FontSize(core.FontSize(c, theme.CaptionSize))
-			})
-		})
+		}
 	})
 }
 
@@ -1021,22 +971,19 @@ func (a *app) viewInfoTab(c *ui.Context, k theme.Tokens, u float32) {
 
 func main() {
 	a := newApp()
-
 	mygo.App.WhenReady(func() {
 		win := mygo.NewWindow(mygo.WindowOptions{
-			Title:           "MyGo Video Player",
+			Title:           "Video Player",
 			Width:           1280,
-			Height:          800,
-			MinWidth:        700,
-			MinHeight:       500,
+			Height:          720,
+			MinWidth:        640,
+			MinHeight:       400,
 			Maximized:       true,
 			FullScreen:      false,
 			BackgroundColor: "#0B0A0B",
 			Content:         ui.View(a.view),
 		})
 		a.win = win
-
-		// Install native menu bar
 		win.SetMenu(a.buildMenu())
 
 		win.OnEnterFullScreen(func() {
@@ -1055,17 +1002,12 @@ func main() {
 				}
 			})
 		})
-		win.OnClosed(func() {
-			a.engine.Close()
-		})
+		win.OnClosed(func() { a.engine.Close() })
 	})
-
 	if err := mygo.App.Run(); err != nil {
 		log.Fatal(err)
 	}
 }
 
-// Close halts the playback engine.
-func (e *PlaybackEngine) Close() {
-	e.Stop()
-}
+// Close stops the playback engine.
+func (e *PlaybackEngine) Close() { e.Stop() }
