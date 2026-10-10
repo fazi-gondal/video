@@ -37,7 +37,7 @@ framework for Go UI and [MujicaUI](https://github.com/ZacharyZhang-NY/MujicaUI).
 ## How to run
 
 ```bash
-mygo run main.go
+go tool mygo dev
 ```
 
 ## How to build
@@ -45,7 +45,7 @@ mygo run main.go
 Using MyGo:
 
 ```bash
-mygo build -o video main.go
+go tool mygo build
 ```
 
 Using standard Go (pure Go build without Cgo):
