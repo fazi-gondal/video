@@ -42,9 +42,9 @@ func TestVideoPlayerView(t *testing.T) {
 		t.Errorf("expected time clock '0:02 / 0:10'; got: %v", tt.Texts())
 	}
 
-	// Side panel tabs visible (short labels: Queue / Subs / Drop)
-	if !tt.HasText("Queue") {
-		t.Errorf("expected 'Queue' tab; got: %v", tt.Texts())
+	// Side panel visible with playlist items
+	if !tt.HasText("Playlist") {
+		t.Errorf("expected 'Playlist' header/tab; got: %v", tt.Texts())
 	}
 }
 
