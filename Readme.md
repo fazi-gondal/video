@@ -1,17 +1,22 @@
 # Video Player
 
-Video player in MyGo Framework with GpuPlayer support.
+A feature-rich video player built with the [MyGo](https://github.com/egoist/mygo)
+framework for Go UI and [MujicaUI](https://github.com/ZacharyZhang-NY/MujicaUI).
 
 ## Features
 
-- [x] Basic video playback
-- [x] Pause and resume
-- [x] Seeking
-- [x] Volume control
-- [x] Fullscreen mode
-- [ ] Audio playback
-- [x] Subtitle support
-- [ ] Hardware decoding support (NVDEC)
+- **Media Playback**: Basic playback, pause, resume, precise seeking,
+  and adjustable playback speed.
+- **Audio Controls**: Volume adjustment, mute/unmute support,
+  and background audio streaming via `ffplay`.
+- **Display Modes**: Fullscreen mode, picture-in-picture (PiP),
+  and resizable native video rendering.
+- **Subtitle Support**: SRT/VTT sidecar file parsing, automatic adjacent
+  subtitle detection, and on-screen cue overlay.
+- **Playlist & Queue**: Queue management, track switching,
+  and multiple item playlist handling.
+- **High-Performance UI**: Declarative native UI built using the MyGo
+  framework and MujicaUI widgets.
 
 ## Dependencies
 
