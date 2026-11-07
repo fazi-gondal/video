@@ -1146,7 +1146,7 @@ func (a *app) viewPanel(c *ui.Context, th *ui.Theme) {
 		panelBg = th.Surface
 	}
 
-	ui.Column(c).Width(280).FillHeight().
+	ui.Column(c).Width(320).FillHeight().
 		Background(panelBg).
 		Border(1, th.Border).Children(func() {
 
@@ -1273,202 +1273,301 @@ func (a *app) viewPanelPlaylist(c *ui.Context, th *ui.Theme) {
 	})
 }
 
-// viewPanelSubtitles: Subtitle tracks and interactive timestamp cue list
+// viewPanelSubtitles: Responsive subtitle tracks, appearance styling, and cue list
 func (a *app) viewPanelSubtitles(c *ui.Context, th *ui.Theme) {
-	ui.Column(c).Grow(1).Padding(10).Gap(8).Children(func() {
-		// Header
-		ui.Row(c).FillWidth().AlignItems(ui.Center).Gap(6).Children(func() {
-			ui.Icon(c, iconCaptions).Size(16, 16).TextColor(th.Accent)
-			nTracks := len(a.subtitleTracks)
-			label := "No subtitles"
-			if nTracks == 1 {
-				label = "1 subtitle track"
-			} else if nTracks > 1 {
-				label = fmt.Sprintf("%d subtitle tracks", nTracks)
-			}
-			ui.Text(c, label).Bold().FontSize(13).TextColor(th.Text)
-		})
+	ui.Scroll(c).Grow(1).Children(func() {
+		ui.Column(c).Grow(1).Padding(10).Gap(10).Children(func() {
 
-		if len(a.subtitleTracks) == 0 {
-			ui.Column(c).Grow(1).Center().Gap(8).Children(func() {
-				ui.Icon(c, iconCaptions).Size(36, 36).TextColor(th.TextMuted)
-				ui.Text(c, "No subtitles detected").
-					TextColor(th.TextMuted).FontSize(13).Bold()
-				ui.Text(c, "Embedded streams and .srt/.vtt\nfiles are auto-detected.").
-					TextColor(th.TextMuted).FontSize(11).TextAlign(ui.Center)
+			// ── 1. Header with Track Count & Add Button ──────────────────────
+			ui.Row(c).FillWidth().AlignItems(ui.Center).Children(func() {
+				ui.Row(c).AlignItems(ui.Center).Gap(6).Children(func() {
+					ui.Icon(c, iconCaptions).Size(16, 16).TextColor(th.Accent)
+					nTracks := len(a.subtitleTracks)
+					label := "Subtitles"
+					if nTracks == 1 {
+						label = "Subtitles (1 track)"
+					} else if nTracks > 1 {
+						label = fmt.Sprintf("Subtitles (%d tracks)", nTracks)
+					}
+					ui.Text(c, label).Bold().FontSize(13).TextColor(th.Text)
+				})
+
+				ui.Box(c).Grow(1)
+
+				addBtn := ui.Button(c, "+ Add Subtitle…").Padding(3, 8, 3, 8).Radius(4)
+				if addBtn.Clicked() {
+					go func() {
+						path, err := openNativeSubtitleDialog()
+						if err != nil || path == "" {
+							return
+						}
+						if a.win != nil {
+							a.win.Update(func() { a.loadSubtitleFile(path) })
+						}
+					}()
+				}
 			})
-			return
-		}
 
-		// Track selector buttons
-		ui.Row(c).FillWidth().AlignItems(ui.Center).Gap(4).Children(func() {
-			ui.Text(c, "Track:").TextColor(th.TextMuted).FontSize(12)
-
-			// Off button
-			offActive := !a.subtitlesOn
-			offBtn := ui.Box(c).Padding(3, 8, 3, 8).Radius(4).Cursor(ui.CursorPointer)
-			if offActive {
-				offBtn.Background(th.Accent).Children(func() {
-					ui.Text(c, "Off").FontSize(11).Bold().TextColor(th.AccentText)
+			// ── 2. Track Selection List (Always shows ALL available tracks) ──
+			ui.Column(c).FillWidth().Padding(8).Radius(8).Background(ui.Hex("#181818")).Gap(6).Children(func() {
+				ui.Row(c).FillWidth().AlignItems(ui.Center).Children(func() {
+					ui.Text(c, "Available Tracks").Bold().FontSize(11).TextColor(th.TextMuted)
+					ui.Box(c).Grow(1)
+					if a.subtitlesOn {
+						ui.Text(c, "Active").FontSize(10).Bold().TextColor(th.Accent)
+					} else {
+						ui.Text(c, "Off").FontSize(10).TextColor(th.TextMuted)
+					}
 				})
-			} else {
-				offBtn.Background(th.Surface).Children(func() {
-					ui.Text(c, "Off").FontSize(11).TextColor(th.Text)
-				})
-			}
-			if offBtn.Clicked() {
-				a.onSubtitles(false)
-			}
 
-			// Individual tracks
-			for i, tr := range a.subtitleTracks {
-				idx, name := i, tr.Name
-				isActive := a.subtitlesOn && a.activeTrackIdx == idx
-				btn := ui.Box(c).Padding(3, 8, 3, 8).Radius(4).Cursor(ui.CursorPointer)
-				if isActive {
-					btn.Background(th.Accent).Children(func() {
-						ui.Text(c, name).FontSize(11).Bold().TextColor(th.AccentText)
+				// "Off / Disabled" Row
+				offRow := ui.Row(c).FillWidth().AlignItems(ui.Center).
+					Padding(5, 8, 5, 8).Radius(5).Cursor(ui.CursorPointer).Gap(8)
+				offActive := !a.subtitlesOn
+				offBg := ui.Transparent
+				offFg := th.TextMuted
+				if offActive {
+					offBg = th.Accent.Alpha(0.18)
+					offFg = th.Accent
+				} else if offRow.Hovered() {
+					offBg = th.SurfaceHover
+					offFg = th.Text
+				}
+				offRow.Background(offBg)
+				offRow.Children(func() {
+					bullet := "○"
+					if offActive {
+						bullet = "●"
+					}
+					ui.Text(c, bullet).FontSize(11).Bold().TextColor(offFg)
+					ui.Text(c, "None (Subtitles Off)").FontSize(12).Bold().TextColor(offFg)
+				})
+				if offRow.Clicked() {
+					a.onSubtitles(false)
+				}
+
+				// All Available Subtitle Tracks
+				if len(a.subtitleTracks) == 0 {
+					ui.Box(c).Padding(6, 4, 6, 4).Children(func() {
+						ui.Text(c, "No tracks loaded. Click '+ Add Subtitle…' to load .srt or .vtt file.").
+							FontSize(11).TextColor(th.TextMuted)
 					})
 				} else {
-					btn.Background(th.Surface).Children(func() {
-						ui.Text(c, name).FontSize(11).TextColor(th.Text)
-					})
-				}
-				if btn.Clicked() {
-					a.activeTrackIdx = idx
-					a.onSubtitles(true)
-					a.statusMsg = "Subtitles: " + name
-				}
-			}
-		})
+					for i, tr := range a.subtitleTracks {
+						idx := i
+						track := tr
+						isActive := a.subtitlesOn && a.activeTrackIdx == idx
 
-		// Subtitle Appearance & Position Controls
-		ui.Column(c).FillWidth().Padding(8).Radius(6).Background(ui.Hex("#191919")).Gap(6).Children(func() {
-			ui.Row(c).FillWidth().AlignItems(ui.Center).Children(func() {
-				ui.Text(c, "Appearance & Position").Bold().FontSize(11).TextColor(th.TextMuted)
-				ui.Box(c).Grow(1)
-				resetBtn := ui.Box(c).Padding(2, 6, 2, 6).Radius(4).Cursor(ui.CursorPointer)
-				if resetBtn.Hovered() {
-					resetBtn.Background(th.SurfaceHover)
+						trackRow := ui.Row(c).FillWidth().AlignItems(ui.Center).
+							Padding(5, 8, 5, 8).Radius(5).Cursor(ui.CursorPointer).Gap(8)
+						tBg := ui.Transparent
+						tFg := th.Text
+						if isActive {
+							tBg = th.Accent.Alpha(0.20)
+							tFg = th.Accent
+						} else if trackRow.Hovered() {
+							tBg = th.SurfaceHover
+						}
+						trackRow.Background(tBg)
+
+						trackRow.Children(func() {
+							bullet := "○"
+							if isActive {
+								bullet = "●"
+							}
+							ui.Text(c, bullet).FontSize(11).Bold().TextColor(tFg)
+
+							ui.Column(c).Grow(1).Gap(1).Children(func() {
+								ui.Text(c, track.Name).Bold().FontSize(12).TextColor(tFg).SingleLine()
+								cueCountText := fmt.Sprintf("%d cues", len(track.Cues))
+								ui.Text(c, cueCountText).FontSize(10).TextColor(th.TextMuted)
+							})
+						})
+
+						if trackRow.Clicked() {
+							a.activeTrackIdx = idx
+							a.onSubtitles(true)
+							a.statusMsg = "Subtitles: " + track.Name
+						}
+					}
 				}
-				resetBtn.Children(func() {
-					ui.Text(c, "Reset").FontSize(10).TextColor(th.Accent)
+			})
+
+			// ── 3. Responsive Subtitle Style & Position Controls ─────────────
+			ui.Column(c).FillWidth().Padding(10).Radius(8).Background(ui.Hex("#181818")).Gap(10).Children(func() {
+				// Section Title & Reset Action
+				ui.Row(c).FillWidth().AlignItems(ui.Center).Children(func() {
+					ui.Text(c, "Subtitle Style & Position").Bold().FontSize(12).TextColor(th.Text)
+					ui.Box(c).Grow(1)
+					resetBtn := ui.Box(c).Padding(2, 6, 2, 6).Radius(4).Cursor(ui.CursorPointer)
+					if resetBtn.Hovered() {
+						resetBtn.Background(th.SurfaceHover)
+					}
+					resetBtn.Children(func() {
+						ui.Text(c, "Reset Default").FontSize(10).TextColor(th.Accent)
+					})
+					if resetBtn.Clicked() {
+						a.subFontSize = 18
+						a.subBottomOffset = 28
+					}
 				})
-				if resetBtn.Clicked() {
-					a.subFontSize = 18
-					a.subBottomOffset = 28
-				}
-			})
 
-			// Font Size Row
-			ui.Row(c).FillWidth().AlignItems(ui.Center).Gap(6).Children(func() {
-				ui.Text(c, "Size:").FontSize(11).TextColor(th.Text)
-				sizeDown := ui.Button(c, "A-").Padding(2, 6, 2, 6).Radius(4)
-				if sizeDown.Clicked() && a.subFontSize > 12 {
-					a.subFontSize -= 2
-				}
-				ui.Text(c, fmt.Sprintf("%.0f pt", a.subFontSize)).Bold().FontSize(11).TextColor(th.Accent)
-				sizeUp := ui.Button(c, "A+").Padding(2, 6, 2, 6).Radius(4)
-				if sizeUp.Clicked() && a.subFontSize < 40 {
-					a.subFontSize += 2
-				}
-
-				ui.Box(c).Grow(1)
-				for _, sz := range []float32{14, 18, 24, 30} {
-					val := sz
-					b := ui.Box(c).Padding(2, 5, 2, 5).Radius(3).Cursor(ui.CursorPointer)
-					if a.subFontSize == val {
-						b.Background(th.Accent).Children(func() {
-							ui.Text(c, fmt.Sprintf("%.0f", val)).FontSize(10).Bold().TextColor(th.AccentText)
+				// Font Size Section
+				ui.Column(c).FillWidth().Gap(5).Children(func() {
+					ui.Row(c).FillWidth().AlignItems(ui.Center).Children(func() {
+						ui.Text(c, "Font Size").FontSize(11).TextColor(th.TextMuted)
+						ui.Box(c).Grow(1)
+						ui.Box(c).Padding(1, 6, 1, 6).Radius(3).Background(th.Accent.Alpha(0.2)).Children(func() {
+							ui.Text(c, fmt.Sprintf("%.0f pt", a.subFontSize)).Bold().FontSize(11).TextColor(th.Accent)
 						})
-					} else {
-						if b.Hovered() {
-							b.Background(th.SurfaceHover)
-						}
-						b.Children(func() {
-							ui.Text(c, fmt.Sprintf("%.0f", val)).FontSize(10).TextColor(th.TextMuted)
-						})
-					}
-					if b.Clicked() {
-						a.subFontSize = val
-					}
-				}
-			})
-
-			// Vertical Position Row
-			ui.Row(c).FillWidth().AlignItems(ui.Center).Gap(6).Children(func() {
-				ui.Text(c, "Position:").FontSize(11).TextColor(th.Text)
-				downBtn := ui.Button(c, "Down ▼").Padding(2, 6, 2, 6).Radius(4)
-				if downBtn.Clicked() && a.subBottomOffset > 8 {
-					a.subBottomOffset -= 15
-				}
-				ui.Text(c, fmt.Sprintf("%.0f px", a.subBottomOffset)).Bold().FontSize(11).TextColor(th.Accent)
-				upBtn := ui.Button(c, "Up ▲").Padding(2, 6, 2, 6).Radius(4)
-				if upBtn.Clicked() && a.subBottomOffset < 350 {
-					a.subBottomOffset += 15
-				}
-
-				ui.Box(c).Grow(1)
-				type posPreset struct {
-					name   string
-					offset float32
-				}
-				for _, p := range []posPreset{{"Low", 28}, {"Mid", 80}, {"High", 180}} {
-					preset := p
-					b := ui.Box(c).Padding(2, 5, 2, 5).Radius(3).Cursor(ui.CursorPointer)
-					if math.Abs(float64(a.subBottomOffset-preset.offset)) < 10 {
-						b.Background(th.Accent).Children(func() {
-							ui.Text(c, preset.name).FontSize(10).Bold().TextColor(th.AccentText)
-						})
-					} else {
-						if b.Hovered() {
-							b.Background(th.SurfaceHover)
-						}
-						b.Children(func() {
-							ui.Text(c, preset.name).FontSize(10).TextColor(th.TextMuted)
-						})
-					}
-					if b.Clicked() {
-						a.subBottomOffset = preset.offset
-					}
-				}
-			})
-		})
-
-		// Cues list
-		cues := a.activeCues()
-		if len(cues) == 0 {
-			return
-		}
-
-		ui.Scroll(c).Grow(1).Children(func() {
-			ui.Column(c).Gap(4).Children(func() {
-				for _, cue := range cues {
-					cueCopy := cue
-					isCurrent := a.position >= cue.Start && a.position <= cue.End
-					row := ui.Row(c).FillWidth().Gap(6).AlignItems(ui.Center).
-						Padding(4, 6, 4, 6).Radius(4).Cursor(ui.CursorPointer)
-					if isCurrent {
-						row.Background(th.Accent.Alpha(0.15))
-					} else if row.Hovered() {
-						row.Background(th.SurfaceHover)
-					}
-
-					row.Children(func() {
-						ts := formatClock(cueCopy.Start)
-						tsColor := th.Accent
-						if !isCurrent {
-							tsColor = th.TextMuted
-						}
-						ui.Text(c, ts).FontSize(11).Bold().TextColor(tsColor)
-						ui.Text(c, cueCopy.Text).FontSize(12).TextColor(th.Text).SingleLine()
 					})
 
-					if row.Clicked() {
-						a.onSeek(cueCopy.Start)
-					}
-				}
+					// Size Step Buttons
+					ui.Row(c).FillWidth().Gap(6).Children(func() {
+						decBtn := ui.Button(c, "A- Smaller").Grow(1).Padding(4, 0, 4, 0).Radius(4)
+						if decBtn.Clicked() && a.subFontSize > 12 {
+							a.subFontSize -= 2
+						}
+						incBtn := ui.Button(c, "A+ Larger").Grow(1).Padding(4, 0, 4, 0).Radius(4)
+						if incBtn.Clicked() && a.subFontSize < 40 {
+							a.subFontSize += 2
+						}
+					})
+
+					// Size Presets Row
+					ui.Row(c).FillWidth().Gap(4).Children(func() {
+						presets := []struct {
+							label string
+							val   float32
+						}{
+							{"14 Sm", 14},
+							{"18 Med", 18},
+							{"24 Lg", 24},
+							{"30 XL", 30},
+						}
+						for _, p := range presets {
+							preset := p
+							chip := ui.Box(c).Grow(1).Center().Padding(3, 2, 3, 2).Radius(4).Cursor(ui.CursorPointer)
+							isSel := a.subFontSize == preset.val
+							bg := ui.Hex("#222222")
+							fg := th.TextMuted
+							if isSel {
+								bg = th.Accent
+								fg = th.AccentText
+							} else if chip.Hovered() {
+								bg = th.SurfaceHover
+								fg = th.Text
+							}
+							chip.Background(bg)
+							chip.Children(func() {
+								ui.Text(c, preset.label).FontSize(10).Bold().TextColor(fg)
+							})
+							if chip.Clicked() {
+								a.subFontSize = preset.val
+							}
+						}
+					})
+				})
+
+				ui.Box(c).FillWidth().Height(1).Background(ui.Hex("#252525"))
+
+				// Vertical Position Section
+				ui.Column(c).FillWidth().Gap(5).Children(func() {
+					ui.Row(c).FillWidth().AlignItems(ui.Center).Children(func() {
+						ui.Text(c, "Vertical Position").FontSize(11).TextColor(th.TextMuted)
+						ui.Box(c).Grow(1)
+						ui.Box(c).Padding(1, 6, 1, 6).Radius(3).Background(th.Accent.Alpha(0.2)).Children(func() {
+							ui.Text(c, fmt.Sprintf("%.0f px from bottom", a.subBottomOffset)).Bold().FontSize(11).TextColor(th.Accent)
+						})
+					})
+
+					// Position Step Buttons
+					ui.Row(c).FillWidth().Gap(6).Children(func() {
+						downBtn := ui.Button(c, "▼ Move Down").Grow(1).Padding(4, 0, 4, 0).Radius(4)
+						if downBtn.Clicked() && a.subBottomOffset > 8 {
+							a.subBottomOffset -= 12
+						}
+						upBtn := ui.Button(c, "▲ Move Up").Grow(1).Padding(4, 0, 4, 0).Radius(4)
+						if upBtn.Clicked() && a.subBottomOffset < 350 {
+							a.subBottomOffset += 12
+						}
+					})
+
+					// Position Presets Row
+					ui.Row(c).FillWidth().Gap(4).Children(func() {
+						presets := []struct {
+							label  string
+							offset float32
+						}{
+							{"Bottom (28px)", 28},
+							{"Lower-Mid (80px)", 80},
+							{"Center (160px)", 160},
+						}
+						for _, p := range presets {
+							preset := p
+							chip := ui.Box(c).Grow(1).Center().Padding(3, 2, 3, 2).Radius(4).Cursor(ui.CursorPointer)
+							isSel := math.Abs(float64(a.subBottomOffset-preset.offset)) < 8
+							bg := ui.Hex("#222222")
+							fg := th.TextMuted
+							if isSel {
+								bg = th.Accent
+								fg = th.AccentText
+							} else if chip.Hovered() {
+								bg = th.SurfaceHover
+								fg = th.Text
+							}
+							chip.Background(bg)
+							chip.Children(func() {
+								ui.Text(c, preset.label).FontSize(10).Bold().TextColor(fg)
+							})
+							if chip.Clicked() {
+								a.subBottomOffset = preset.offset
+							}
+						}
+					})
+				})
 			})
+
+			// ── 4. Interactive Cues List (Click to seek) ──────────────────────
+			cues := a.activeCues()
+			if len(cues) > 0 {
+				ui.Column(c).FillWidth().Padding(8).Radius(8).Background(ui.Hex("#181818")).Gap(6).Children(func() {
+					ui.Row(c).FillWidth().AlignItems(ui.Center).Children(func() {
+						ui.Text(c, fmt.Sprintf("Subtitle Cues (%d)", len(cues))).Bold().FontSize(11).TextColor(th.TextMuted)
+						ui.Box(c).Grow(1)
+						ui.Text(c, "Click cue to jump").FontSize(10).TextColor(th.TextMuted)
+					})
+
+					// Show list of cues
+					ui.Column(c).FillWidth().Gap(3).Children(func() {
+						for _, cue := range cues {
+							cueCopy := cue
+							isCurrent := a.position >= cue.Start && a.position <= cue.End
+							row := ui.Row(c).FillWidth().Gap(6).AlignItems(ui.Center).
+								Padding(4, 6, 4, 6).Radius(4).Cursor(ui.CursorPointer)
+							if isCurrent {
+								row.Background(th.Accent.Alpha(0.18))
+							} else if row.Hovered() {
+								row.Background(th.SurfaceHover)
+							}
+
+							row.Children(func() {
+								ts := formatClock(cueCopy.Start)
+								tsColor := th.Accent
+								if !isCurrent {
+									tsColor = th.TextMuted
+								}
+								ui.Text(c, ts).FontSize(11).Bold().TextColor(tsColor)
+								ui.Text(c, cueCopy.Text).FontSize(12).TextColor(th.Text).SingleLine()
+							})
+
+							if row.Clicked() {
+								a.onSeek(cueCopy.Start)
+							}
+						}
+					})
+				})
+			}
 		})
 	})
 }

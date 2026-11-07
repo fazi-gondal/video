@@ -274,5 +274,47 @@ func TestSubtitleSettings(t *testing.T) {
 	}
 }
 
+func TestSubtitlePanelResponsiveLayout(t *testing.T) {
+	a := newApp()
+	a.showPanel = true
+	a.panelTab = 1 // Subtitle tab
+	a.subtitlesOn = true
+	a.subtitleTracks = []SubtitleTrack{
+		{Name: "English [SDH]", Cues: []SubtitleCue{{Start: 1 * time.Second, End: 3 * time.Second, Text: "Hello"}}},
+		{Name: "Spanish", Cues: []SubtitleCue{{Start: 1 * time.Second, End: 3 * time.Second, Text: "Hola"}}},
+		{Name: "French", Cues: []SubtitleCue{{Start: 1 * time.Second, End: 3 * time.Second, Text: "Bonjour"}}},
+		{Name: "German", Cues: []SubtitleCue{{Start: 1 * time.Second, End: 3 * time.Second, Text: "Hallo"}}},
+	}
+	a.activeTrackIdx = 0
+
+	tt := ui.NewTester(a.view, 1280, 720)
+
+	// All 4 tracks must be rendered
+	if !tt.HasText("English [SDH]") {
+		t.Errorf("expected 'English [SDH]' to be rendered")
+	}
+	if !tt.HasText("Spanish") {
+		t.Errorf("expected 'Spanish' to be rendered")
+	}
+	if !tt.HasText("French") {
+		t.Errorf("expected 'French' to be rendered")
+	}
+	if !tt.HasText("German") {
+		t.Errorf("expected 'German' to be rendered")
+	}
+
+	// Subtitle controls rendered
+	if !tt.HasText("Subtitle Style & Position") {
+		t.Errorf("expected 'Subtitle Style & Position' header")
+	}
+	if !tt.HasText("A- Smaller") || !tt.HasText("A+ Larger") {
+		t.Errorf("expected size stepper buttons")
+	}
+	if !tt.HasText("▼ Move Down") || !tt.HasText("▲ Move Up") {
+		t.Errorf("expected position stepper buttons")
+	}
+}
+
+
 
 
