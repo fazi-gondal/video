@@ -6,6 +6,8 @@ This Project is also Listed on
 
 [![Listed on Awesome MyGo](https://awesomemygo.dev/badge.svg)](https://awesomemygo.dev/apps/video-player)
 
+![demo](/resources/demo.png)
+
 ## Key Features
 
 ### 1. Zero-Dependency Standalone Playback (No FFmpeg Required)
