@@ -2,7 +2,9 @@
 
 A high-performance, lightweight video and audio player built with [MyGo](https://github.com/egoist/mygo) native UI in pure Go. Engineered for responsive media playback, extensive format compatibility, zero-dependency standalone execution on Windows, and hardware-accelerated HD/4K playback.
 
----
+This Project is also Listed on
+
+[![Listed on Awesome MyGo](https://awesomemygo.dev/badge.svg)](https://awesomemygo.dev/apps/video-player)
 
 ## Key Features
 
