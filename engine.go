@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -219,10 +220,12 @@ func ExtractSingleFrameAt(path string, at time.Duration, w, h int) (image.Image,
 		return GenerateAudioFrame(filepath.Base(path), at, 10*time.Second, fw, fh), nil
 	}
 
-	// If ffmpeg is available, use it for frame extraction
+	// If ffmpeg is available, use it for frame extraction with hardware acceleration
 	if _, err := exec.LookPath("ffmpeg"); err == nil {
 		secStr := fmt.Sprintf("%.3f", at.Seconds())
 		cmd := exec.Command("ffmpeg",
+			"-hwaccel", "auto",
+			"-threads", "0",
 			"-ss", secStr,
 			"-i", path,
 			"-vframes", "1",
@@ -266,6 +269,7 @@ type PlaybackEngine struct {
 	vidWidth   int
 	vidHeight  int
 	isAudio    bool
+	seekSeq    uint64
 	cancelFunc context.CancelFunc
 	onFrame    func(img image.Image, pos time.Duration)
 	onEnd      func()
@@ -333,7 +337,7 @@ func (e *PlaybackEngine) Pause() {
 	e.stopLocked()
 }
 
-// Seek seeks to a given timestamp.
+// Seek seeks to a given timestamp with instant response.
 func (e *PlaybackEngine) Seek(pos time.Duration) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -347,23 +351,29 @@ func (e *PlaybackEngine) Seek(pos time.Duration) {
 	wasPlaying := e.playing
 	e.stopLocked()
 
+	// If playing, immediately start streaming from the new position with zero delay
+	if wasPlaying {
+		e.playing = true
+		e.startStreamLocked()
+		return
+	}
+
+	// When paused, extract a single frame for preview at the seeked position
 	path := e.filePath
 	vw := e.vidWidth
 	vh := e.vidHeight
-	go func(targetPos time.Duration, p string, w, h int) {
+	e.seekSeq++
+	seq := e.seekSeq
+	go func(targetPos time.Duration, p string, w, h int, s uint64) {
 		img, _ := ExtractSingleFrameAt(p, targetPos, w, h)
 		e.mu.Lock()
 		defer e.mu.Unlock()
-		if e.filePath == p && e.position == targetPos {
+		if s == e.seekSeq && e.filePath == p && !e.playing {
 			if e.onFrame != nil {
 				e.onFrame(img, targetPos)
 			}
-			if wasPlaying {
-				e.playing = true
-				e.startStreamLocked()
-			}
 		}
-	}(pos, path, vw, vh)
+	}(pos, path, vw, vh, seq)
 }
 
 // SetRate changes the playback speed.
@@ -495,13 +505,29 @@ while ($w.playState -ne 1 -and $w.playState -ne 8) {
 	_ = cmd.Run()
 }
 
-// runVideo streams raw RGBA frames from ffmpeg when available.
+// runVideo streams raw RGBA frames from ffmpeg with hardware acceleration and double-buffered frame reuse.
 func (e *PlaybackEngine) runVideo(ctx context.Context, path string, start time.Duration, rate float64, duration time.Duration, vw, vh int) {
 	targetFPS := 25.0
+
+	// Scale to max 1080p viewport while preserving exact aspect ratio for smooth HD/4K playback
+	decW, decH := vw, vh
+	if decW > 1920 {
+		decH = int(float64(decH) * (1920.0 / float64(decW)))
+		decW = 1920
+	}
+	if decH > 1080 {
+		decW = int(float64(decW) * (1080.0 / float64(decH)))
+		decH = 1080
+	}
+	decW = max(2, (decW/2)*2)
+	decH = max(2, (decH/2)*2)
+
 	cmd := exec.CommandContext(ctx, "ffmpeg",
+		"-hwaccel", "auto",
+		"-threads", "0",
 		"-ss", fmt.Sprintf("%.3f", start.Seconds()),
 		"-i", path,
-		"-s", fmt.Sprintf("%dx%d", vw, vh),
+		"-s", fmt.Sprintf("%dx%d", decW, decH),
 		"-f", "rawvideo",
 		"-pix_fmt", "rgba",
 		"-r", fmt.Sprintf("%.1f", targetFPS),
@@ -520,7 +546,14 @@ func (e *PlaybackEngine) runVideo(ctx context.Context, path string, start time.D
 		return
 	}
 
-	frameBytes := vw * vh * 4
+	frameBytes := decW * decH * 4
+	reader := bufio.NewReaderSize(stdout, frameBytes*2)
+
+	// Pre-allocate 2 frame buffers for double-buffering (eliminates continuous garbage collection spikes)
+	bufA := make([]byte, frameBytes)
+	bufB := make([]byte, frameBytes)
+	useBufA := true
+
 	frameInterval := time.Duration(float64(time.Second) / (targetFPS * rate))
 	frameDuration := time.Duration(float64(time.Second) / targetFPS)
 
@@ -531,11 +564,18 @@ func (e *PlaybackEngine) runVideo(ctx context.Context, path string, start time.D
 	for {
 		select {
 		case <-ctx.Done():
-			_ = cmd.Process.Kill()
+			if cmd.Process != nil {
+				_ = cmd.Process.Kill()
+			}
 			return
 		case <-ticker.C:
-			buf := make([]byte, frameBytes)
-			_, err := io.ReadFull(stdout, buf)
+			currentBuf := bufA
+			if !useBufA {
+				currentBuf = bufB
+			}
+			useBufA = !useBufA
+
+			_, err := io.ReadFull(reader, currentBuf)
 			if err != nil {
 				if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
 					e.handlePlaybackEnded()
@@ -553,9 +593,9 @@ func (e *PlaybackEngine) runVideo(ctx context.Context, path string, start time.D
 			e.mu.Unlock()
 
 			img := &image.RGBA{
-				Pix:    buf,
-				Stride: vw * 4,
-				Rect:   image.Rect(0, 0, vw, vh),
+				Pix:    currentBuf,
+				Stride: decW * 4,
+				Rect:   image.Rect(0, 0, decW, decH),
 			}
 
 			if e.onFrame != nil {

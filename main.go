@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"image"
 	"log"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -92,9 +93,11 @@ type app struct {
 	muted    bool
 
 	// Subtitle state
-	subtitlesOn    bool
-	subtitleTracks []SubtitleTrack
-	activeTrackIdx int // -1 = none
+	subtitlesOn     bool
+	subtitleTracks  []SubtitleTrack
+	activeTrackIdx  int // -1 = none
+	subFontSize     float32
+	subBottomOffset float32
 
 	// Window / UI state
 	fullscreen bool
@@ -122,9 +125,11 @@ func newApp() *app {
 	a := &app{
 		rate:           1.0,
 		volume:         0.8,
-		subtitlesOn:    false,
-		activeTrackIdx: -1,
-		showPanel:      false,
+		subtitlesOn:     false,
+		activeTrackIdx:  -1,
+		subFontSize:     18,
+		subBottomOffset: 28,
+		showPanel:       false,
 		darkMode:       true,
 		statusMsg:      "Open audio or video with File > Open… (Ctrl+O)",
 	}
@@ -716,6 +721,52 @@ func (a *app) buildMenu() []*mygo.MenuItem {
 					}
 				}()
 			}},
+			mygo.Separator(),
+			{Label: "Increase Subtitle Size", Accelerator: "CmdOrCtrl+=", Click: func(_ *mygo.MenuItem, win *mygo.Window) {
+				if win != nil {
+					win.Update(func() {
+						if a.subFontSize < 40 {
+							a.subFontSize += 2
+						}
+					})
+				}
+			}},
+			{Label: "Decrease Subtitle Size", Accelerator: "CmdOrCtrl+-", Click: func(_ *mygo.MenuItem, win *mygo.Window) {
+				if win != nil {
+					win.Update(func() {
+						if a.subFontSize > 12 {
+							a.subFontSize -= 2
+						}
+					})
+				}
+			}},
+			mygo.Separator(),
+			{Label: "Move Subtitle Up", Accelerator: "Alt+Up", Click: func(_ *mygo.MenuItem, win *mygo.Window) {
+				if win != nil {
+					win.Update(func() {
+						if a.subBottomOffset < 300 {
+							a.subBottomOffset += 15
+						}
+					})
+				}
+			}},
+			{Label: "Move Subtitle Down", Accelerator: "Alt+Down", Click: func(_ *mygo.MenuItem, win *mygo.Window) {
+				if win != nil {
+					win.Update(func() {
+						if a.subBottomOffset > 10 {
+							a.subBottomOffset -= 15
+						}
+					})
+				}
+			}},
+			{Label: "Reset Subtitle Style", Click: func(_ *mygo.MenuItem, win *mygo.Window) {
+				if win != nil {
+					win.Update(func() {
+						a.subFontSize = 18
+						a.subBottomOffset = 28
+					})
+				}
+			}},
 		}},
 		{Label: "View", Submenu: []*mygo.MenuItem{
 			panelItem,
@@ -851,14 +902,14 @@ func (a *app) viewStage(c *ui.Context, th *ui.Theme) {
 
 		// Subtitle overlay
 		if sub := a.currentSubtitle(); a.subtitlesOn && sub != "" {
-			ui.Box(c).Absolute().Left(0).Right(0).Bottom(24).
+			ui.Box(c).Absolute().Left(0).Right(0).Bottom(a.subBottomOffset).
 				Center().PassThrough().Children(func() {
 				ui.Text(c, sub).
 					TextColor(ui.Hex("#FFFFFF")).
-					Background(ui.RGBA(0, 0, 0, 0.82)).
+					Background(ui.RGBA(0, 0, 0, 0.85)).
 					Padding(6, 16, 6, 16).
-					Radius(4).TextAlign(ui.Center).MaxLines(4).
-					FontSize(16).Bold()
+					Radius(6).TextAlign(ui.Center).MaxLines(4).
+					FontSize(a.subFontSize).Bold()
 			})
 		}
 	})
@@ -1289,6 +1340,99 @@ func (a *app) viewPanelSubtitles(c *ui.Context, th *ui.Theme) {
 					a.statusMsg = "Subtitles: " + name
 				}
 			}
+		})
+
+		// Subtitle Appearance & Position Controls
+		ui.Column(c).FillWidth().Padding(8).Radius(6).Background(ui.Hex("#191919")).Gap(6).Children(func() {
+			ui.Row(c).FillWidth().AlignItems(ui.Center).Children(func() {
+				ui.Text(c, "Appearance & Position").Bold().FontSize(11).TextColor(th.TextMuted)
+				ui.Box(c).Grow(1)
+				resetBtn := ui.Box(c).Padding(2, 6, 2, 6).Radius(4).Cursor(ui.CursorPointer)
+				if resetBtn.Hovered() {
+					resetBtn.Background(th.SurfaceHover)
+				}
+				resetBtn.Children(func() {
+					ui.Text(c, "Reset").FontSize(10).TextColor(th.Accent)
+				})
+				if resetBtn.Clicked() {
+					a.subFontSize = 18
+					a.subBottomOffset = 28
+				}
+			})
+
+			// Font Size Row
+			ui.Row(c).FillWidth().AlignItems(ui.Center).Gap(6).Children(func() {
+				ui.Text(c, "Size:").FontSize(11).TextColor(th.Text)
+				sizeDown := ui.Button(c, "A-").Padding(2, 6, 2, 6).Radius(4)
+				if sizeDown.Clicked() && a.subFontSize > 12 {
+					a.subFontSize -= 2
+				}
+				ui.Text(c, fmt.Sprintf("%.0f pt", a.subFontSize)).Bold().FontSize(11).TextColor(th.Accent)
+				sizeUp := ui.Button(c, "A+").Padding(2, 6, 2, 6).Radius(4)
+				if sizeUp.Clicked() && a.subFontSize < 40 {
+					a.subFontSize += 2
+				}
+
+				ui.Box(c).Grow(1)
+				for _, sz := range []float32{14, 18, 24, 30} {
+					val := sz
+					b := ui.Box(c).Padding(2, 5, 2, 5).Radius(3).Cursor(ui.CursorPointer)
+					if a.subFontSize == val {
+						b.Background(th.Accent).Children(func() {
+							ui.Text(c, fmt.Sprintf("%.0f", val)).FontSize(10).Bold().TextColor(th.AccentText)
+						})
+					} else {
+						if b.Hovered() {
+							b.Background(th.SurfaceHover)
+						}
+						b.Children(func() {
+							ui.Text(c, fmt.Sprintf("%.0f", val)).FontSize(10).TextColor(th.TextMuted)
+						})
+					}
+					if b.Clicked() {
+						a.subFontSize = val
+					}
+				}
+			})
+
+			// Vertical Position Row
+			ui.Row(c).FillWidth().AlignItems(ui.Center).Gap(6).Children(func() {
+				ui.Text(c, "Position:").FontSize(11).TextColor(th.Text)
+				downBtn := ui.Button(c, "Down ▼").Padding(2, 6, 2, 6).Radius(4)
+				if downBtn.Clicked() && a.subBottomOffset > 8 {
+					a.subBottomOffset -= 15
+				}
+				ui.Text(c, fmt.Sprintf("%.0f px", a.subBottomOffset)).Bold().FontSize(11).TextColor(th.Accent)
+				upBtn := ui.Button(c, "Up ▲").Padding(2, 6, 2, 6).Radius(4)
+				if upBtn.Clicked() && a.subBottomOffset < 350 {
+					a.subBottomOffset += 15
+				}
+
+				ui.Box(c).Grow(1)
+				type posPreset struct {
+					name   string
+					offset float32
+				}
+				for _, p := range []posPreset{{"Low", 28}, {"Mid", 80}, {"High", 180}} {
+					preset := p
+					b := ui.Box(c).Padding(2, 5, 2, 5).Radius(3).Cursor(ui.CursorPointer)
+					if math.Abs(float64(a.subBottomOffset-preset.offset)) < 10 {
+						b.Background(th.Accent).Children(func() {
+							ui.Text(c, preset.name).FontSize(10).Bold().TextColor(th.AccentText)
+						})
+					} else {
+						if b.Hovered() {
+							b.Background(th.SurfaceHover)
+						}
+						b.Children(func() {
+							ui.Text(c, preset.name).FontSize(10).TextColor(th.TextMuted)
+						})
+					}
+					if b.Clicked() {
+						a.subBottomOffset = preset.offset
+					}
+				}
+			})
 		})
 
 		// Cues list

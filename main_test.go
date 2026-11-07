@@ -252,4 +252,27 @@ func TestNativeDialogFilters(t *testing.T) {
 	}
 }
 
+func TestSubtitleSettings(t *testing.T) {
+	a := newApp()
+	if a.subFontSize != 18 {
+		t.Errorf("expected default subFontSize 18, got %v", a.subFontSize)
+	}
+	if a.subBottomOffset != 28 {
+		t.Errorf("expected default subBottomOffset 28, got %v", a.subBottomOffset)
+	}
+
+	// Adjust font size
+	a.subFontSize += 4
+	if a.subFontSize != 22 {
+		t.Errorf("expected subFontSize 22, got %v", a.subFontSize)
+	}
+
+	// Adjust vertical offset (move up/down)
+	a.subBottomOffset += 20
+	if a.subBottomOffset != 48 {
+		t.Errorf("expected subBottomOffset 48, got %v", a.subBottomOffset)
+	}
+}
+
+
 
