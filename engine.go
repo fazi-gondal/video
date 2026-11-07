@@ -19,14 +19,13 @@ import (
 	"time"
 )
 
-// defaultWidth / defaultHeight are used only as fallbacks before the first
-// video is probed. Actual decoding uses the real video dimensions.
+// defaultWidth / defaultHeight are fallback dimensions for UI canvases.
 const (
 	defaultWidth  = 1280
 	defaultHeight = 720
 )
 
-// VideoInfo holds metadata about a media file.
+// VideoInfo holds metadata about a media file (audio or video).
 type VideoInfo struct {
 	Path       string
 	Title      string
@@ -37,6 +36,7 @@ type VideoInfo struct {
 	VideoCodec string
 	AudioCodec string
 	FileSize   int64
+	IsAudio    bool
 }
 
 // ffprobeJSON is the output shape of ffprobe.
@@ -54,12 +54,26 @@ type ffprobeJSON struct {
 	} `json:"format"`
 }
 
-// ProbeVideo inspects a media file using ffprobe.
+// IsAudioPath checks if a file extension represents an audio format.
+func IsAudioPath(path string) bool {
+	ext := strings.ToLower(filepath.Ext(path))
+	switch ext {
+	case ".mp3", ".wav", ".flac", ".aac", ".m4a", ".ogg", ".wma", ".alac", ".aiff", ".aif", ".mid", ".midi", ".opus":
+		return true
+	default:
+		return false
+	}
+}
+
+// ProbeVideo inspects a media file (audio or video), working seamlessly with or without ffmpeg.
 func ProbeVideo(path string) (*VideoInfo, error) {
 	st, err := os.Stat(path)
 	if err != nil {
 		return nil, err
 	}
+
+	ext := strings.ToLower(filepath.Ext(path))
+	isAudio := IsAudioPath(path)
 
 	info := &VideoInfo{
 		Path:     path,
@@ -69,55 +83,123 @@ func ProbeVideo(path string) (*VideoInfo, error) {
 		Height:   defaultHeight,
 		FPS:      25,
 		Duration: 10 * time.Second,
+		IsAudio:  isAudio,
 	}
 
-	cmd := exec.Command("ffprobe", "-v", "quiet", "-print_format", "json", "-show_format", "-show_streams", path)
-	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: 0x08000000}
-	out, err := cmd.Output()
-	if err == nil {
-		var probe ffprobeJSON
-		if err := json.Unmarshal(out, &probe); err == nil {
-			if probe.Format.Duration != "" {
-				if dSec, err := strconv.ParseFloat(probe.Format.Duration, 64); err == nil && dSec > 0 {
-					info.Duration = time.Duration(dSec * float64(time.Second))
-				}
-			}
-			for _, s := range probe.Streams {
-				if s.CodecType == "video" {
-					info.VideoCodec = strings.ToUpper(s.CodecName)
-					if s.Width > 0 && s.Height > 0 {
-						info.Width = s.Width
-						info.Height = s.Height
+	// 1. Check if ffprobe is installed in PATH
+	hasFFprobe := false
+	if _, err := exec.LookPath("ffprobe"); err == nil {
+		hasFFprobe = true
+	}
+
+	if hasFFprobe {
+		cmd := exec.Command("ffprobe", "-v", "quiet", "-print_format", "json", "-show_format", "-show_streams", path)
+		cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: 0x08000000}
+		if out, err := cmd.Output(); err == nil {
+			var probe ffprobeJSON
+			if err := json.Unmarshal(out, &probe); err == nil {
+				if probe.Format.Duration != "" {
+					if dSec, err := strconv.ParseFloat(probe.Format.Duration, 64); err == nil && dSec > 0 {
+						info.Duration = time.Duration(dSec * float64(time.Second))
 					}
-					if s.AvgFrameRate != "" {
-						parts := strings.Split(s.AvgFrameRate, "/")
-						if len(parts) == 2 {
-							num, _ := strconv.ParseFloat(parts[0], 64)
-							den, _ := strconv.ParseFloat(parts[1], 64)
-							if den > 0 && num > 0 {
-								info.FPS = num / den
+				}
+				for _, s := range probe.Streams {
+					switch s.CodecType {
+					case "video":
+						info.VideoCodec = strings.ToUpper(s.CodecName)
+						if s.Width > 0 && s.Height > 0 {
+							info.Width = s.Width
+							info.Height = s.Height
+						}
+						if s.AvgFrameRate != "" {
+							parts := strings.Split(s.AvgFrameRate, "/")
+							if len(parts) == 2 {
+								num, _ := strconv.ParseFloat(parts[0], 64)
+								den, _ := strconv.ParseFloat(parts[1], 64)
+								if den > 0 && num > 0 {
+									info.FPS = num / den
+								}
 							}
 						}
+					case "audio":
+						info.AudioCodec = strings.ToUpper(s.CodecName)
 					}
-				} else if s.CodecType == "audio" {
-					info.AudioCodec = strings.ToUpper(s.CodecName)
 				}
 			}
 		}
 	}
 
-	if info.VideoCodec == "" {
-		info.VideoCodec = "AVC/H.264"
+	// 2. Format / Codec inference without ffprobe
+	if info.VideoCodec == "" && !isAudio {
+		switch ext {
+		case ".mp4":
+			info.VideoCodec = "H.264 / AVC"
+		case ".mkv":
+			info.VideoCodec = "Matroska / H.264"
+		case ".webm":
+			info.VideoCodec = "VP9 / WebM"
+		case ".avi":
+			info.VideoCodec = "AVI / MPEG-4"
+		case ".mov":
+			info.VideoCodec = "QuickTime MOV"
+		case ".wmv":
+			info.VideoCodec = "WMV"
+		case ".flv":
+			info.VideoCodec = "FLV"
+		default:
+			info.VideoCodec = "Video"
+		}
 	}
+
 	if info.AudioCodec == "" {
-		info.AudioCodec = "AAC"
+		switch ext {
+		case ".mp3":
+			info.AudioCodec = "MP3"
+		case ".wav":
+			info.AudioCodec = "WAV / PCM"
+		case ".flac":
+			info.AudioCodec = "FLAC Lossless"
+		case ".aac":
+			info.AudioCodec = "AAC"
+		case ".m4a":
+			info.AudioCodec = "M4A / ALAC"
+		case ".ogg":
+			info.AudioCodec = "Ogg Vorbis"
+		case ".wma":
+			info.AudioCodec = "WMA"
+		case ".aiff", ".aif":
+			info.AudioCodec = "AIFF"
+		case ".mid", ".midi":
+			info.AudioCodec = "MIDI"
+		case ".opus":
+			info.AudioCodec = "Opus"
+		default:
+			if isAudio {
+				info.AudioCodec = strings.ToUpper(strings.TrimPrefix(ext, "."))
+			} else {
+				info.AudioCodec = "AAC"
+			}
+		}
+	}
+
+	// 3. Native Windows duration probing (without ffmpeg)
+	if !hasFFprobe || info.Duration == 10*time.Second {
+		absPath, _ := filepath.Abs(path)
+		psCmd := fmt.Sprintf(`$w = New-Object -ComObject WMPlayer.OCX; $m = $w.newMedia('%s'); Write-Output $m.duration`, strings.ReplaceAll(absPath, `'`, `''`))
+		cmd := exec.Command("powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", psCmd)
+		cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: 0x08000000}
+		if out, err := cmd.Output(); err == nil {
+			durStr := strings.TrimSpace(string(out))
+			if durSec, err := strconv.ParseFloat(durStr, 64); err == nil && durSec > 0 {
+				info.Duration = time.Duration(durSec * float64(time.Second))
+			}
+		}
 	}
 
 	return info, nil
 }
 
-// ExtractSingleFrame extracts one RGBA frame at the specified timestamp at
-// the video's native resolution (no downscale).
+// ExtractSingleFrame extracts one frame at the specified timestamp.
 func ExtractSingleFrame(path string, at time.Duration) (image.Image, error) {
 	return ExtractSingleFrameAt(path, at, 0, 0)
 }
@@ -126,50 +208,49 @@ func ExtractSingleFrame(path string, at time.Duration) (image.Image, error) {
 func ExtractSingleFrameAt(path string, at time.Duration, w, h int) (image.Image, error) {
 	fw, fh := w, h
 	if fw <= 0 || fh <= 0 {
-		// Let ffmpeg keep native resolution — probe it first
-		probe, _ := ProbeVideo(path)
-		if probe != nil && probe.Width > 0 && probe.Height > 0 {
-			fw, fh = probe.Width, probe.Height
+		if info, err := ProbeVideo(path); err == nil && info.Width > 0 && info.Height > 0 {
+			fw, fh = info.Width, info.Height
 		} else {
 			fw, fh = defaultWidth, defaultHeight
 		}
 	}
 
-	secStr := fmt.Sprintf("%.3f", at.Seconds())
-	cmd := exec.Command("ffmpeg",
-		"-ss", secStr,
-		"-i", path,
-		"-vframes", "1",
-		"-s", fmt.Sprintf("%dx%d", fw, fh),
-		"-f", "rawvideo",
-		"-pix_fmt", "rgba",
-		"-",
-	)
-	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: 0x08000000}
-
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		return GenerateTestFrame(filepath.Base(path), at, 10*time.Second, fw, fh), nil
-	}
-	if err := cmd.Start(); err != nil {
-		return GenerateTestFrame(filepath.Base(path), at, 10*time.Second, fw, fh), nil
+	if IsAudioPath(path) {
+		return GenerateAudioFrame(filepath.Base(path), at, 10*time.Second, fw, fh), nil
 	}
 
-	bufSize := fw * fh * 4
-	buf := make([]byte, bufSize)
-	_, readErr := io.ReadFull(stdout, buf)
-	_ = cmd.Wait()
+	// If ffmpeg is available, use it for frame extraction
+	if _, err := exec.LookPath("ffmpeg"); err == nil {
+		secStr := fmt.Sprintf("%.3f", at.Seconds())
+		cmd := exec.Command("ffmpeg",
+			"-ss", secStr,
+			"-i", path,
+			"-vframes", "1",
+			"-s", fmt.Sprintf("%dx%d", fw, fh),
+			"-f", "rawvideo",
+			"-pix_fmt", "rgba",
+			"-",
+		)
+		cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: 0x08000000}
 
-	if readErr != nil {
-		return GenerateTestFrame(filepath.Base(path), at, 10*time.Second, fw, fh), nil
+		stdout, err := cmd.StdoutPipe()
+		if err == nil && cmd.Start() == nil {
+			bufSize := fw * fh * 4
+			buf := make([]byte, bufSize)
+			if _, readErr := io.ReadFull(stdout, buf); readErr == nil {
+				_ = cmd.Wait()
+				return &image.RGBA{
+					Pix:    buf,
+					Stride: fw * 4,
+					Rect:   image.Rect(0, 0, fw, fh),
+				}, nil
+			}
+			_ = cmd.Wait()
+		}
 	}
 
-	img := &image.RGBA{
-		Pix:    buf,
-		Stride: fw * 4,
-		Rect:   image.Rect(0, 0, fw, fh),
-	}
-	return img, nil
+	// Standalone fallback: clean synthetic frame
+	return GenerateTestFrame(filepath.Base(path), at, 10*time.Second, fw, fh), nil
 }
 
 // PlaybackEngine manages video and audio playback pipelines.
@@ -182,9 +263,9 @@ type PlaybackEngine struct {
 	rate       float64
 	volume     float64
 	muted      bool
-	// Native video dimensions — set via SetResolution after probing.
 	vidWidth   int
 	vidHeight  int
+	isAudio    bool
 	cancelFunc context.CancelFunc
 	onFrame    func(img image.Image, pos time.Duration)
 	onEnd      func()
@@ -202,18 +283,18 @@ func NewPlaybackEngine(onFrame func(img image.Image, pos time.Duration), onEnd f
 	}
 }
 
-// Load sets the active media file and duration.
-func (e *PlaybackEngine) Load(path string, duration time.Duration) {
+// Load sets the active media file, duration, and media type.
+func (e *PlaybackEngine) Load(path string, duration time.Duration, isAudio bool) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	e.stopLocked()
 	e.filePath = path
 	e.duration = duration
 	e.position = 0
+	e.isAudio = isAudio
 }
 
 // SetResolution updates the decode resolution to the video's native size.
-// Call this after Load when the VideoInfo is available.
 func (e *PlaybackEngine) SetResolution(w, h int) {
 	if w <= 0 || h <= 0 {
 		return
@@ -266,10 +347,11 @@ func (e *PlaybackEngine) Seek(pos time.Duration) {
 	wasPlaying := e.playing
 	e.stopLocked()
 
-	// Extract single frame at target timestamp
 	path := e.filePath
-	go func(targetPos time.Duration, p string) {
-		img, _ := ExtractSingleFrame(p, targetPos)
+	vw := e.vidWidth
+	vh := e.vidHeight
+	go func(targetPos time.Duration, p string, w, h int) {
+		img, _ := ExtractSingleFrameAt(p, targetPos, w, h)
 		e.mu.Lock()
 		defer e.mu.Unlock()
 		if e.filePath == p && e.position == targetPos {
@@ -281,7 +363,7 @@ func (e *PlaybackEngine) Seek(pos time.Duration) {
 				e.startStreamLocked()
 			}
 		}
-	}(pos, path)
+	}(pos, path, vw, vh)
 }
 
 // SetRate changes the playback speed.
@@ -305,7 +387,6 @@ func (e *PlaybackEngine) SetVolume(v float64, muted bool) {
 	e.volume = max(0, min(1, v))
 	e.muted = muted
 	if e.playing {
-		// Restart stream to apply audio volume change cleanly
 		e.stopLocked()
 		e.startStreamLocked()
 	}
@@ -339,16 +420,35 @@ func (e *PlaybackEngine) startStreamLocked() {
 	isMuted := e.muted
 	vw := e.vidWidth
 	vh := e.vidHeight
+	isAudio := e.isAudio
 
-	// Audio pipeline via ffplay
-	if !isMuted && vol > 0 {
-		go e.runAudio(ctx, path, startPos, rate, vol)
+	hasFFplay := false
+	if _, err := exec.LookPath("ffplay"); err == nil {
+		hasFFplay = true
+	}
+	hasFFmpeg := false
+	if _, err := exec.LookPath("ffmpeg"); err == nil {
+		hasFFmpeg = true
 	}
 
-	// Video frame reader pipeline (native resolution)
-	go e.runVideo(ctx, path, startPos, rate, duration, vw, vh)
+	// Audio pipeline: ffplay if available, otherwise native Windows audio engine
+	if !isMuted && vol > 0 {
+		if hasFFplay {
+			go e.runAudio(ctx, path, startPos, rate, vol)
+		} else {
+			go e.runAudioNative(ctx, path, startPos, rate, vol)
+		}
+	}
+
+	// Video / Frame reader pipeline
+	if !isAudio && hasFFmpeg {
+		go e.runVideo(ctx, path, startPos, rate, duration, vw, vh)
+	} else {
+		go e.runNativeTimer(ctx, path, startPos, rate, duration, isAudio)
+	}
 }
 
+// runAudio uses ffplay when installed.
 func (e *PlaybackEngine) runAudio(ctx context.Context, path string, start time.Duration, rate, vol float64) {
 	intVol := int(math.Round(vol * 100))
 	args := []string{
@@ -367,9 +467,36 @@ func (e *PlaybackEngine) runAudio(ctx context.Context, path string, start time.D
 	_ = cmd.Run()
 }
 
+// runAudioNative uses Windows Media Player engine natively without ffmpeg.
+func (e *PlaybackEngine) runAudioNative(ctx context.Context, path string, start time.Duration, rate, vol float64) {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return
+	}
+	intVol := int(math.Round(vol * 100))
+	startSec := start.Seconds()
+
+	script := fmt.Sprintf(`
+$w = New-Object -ComObject WMPlayer.OCX
+$w.settings.autoStart = $false
+$w.URL = '%s'
+$w.settings.volume = %d
+$w.settings.rate = %.2f
+$w.controls.currentPosition = %.3f
+$w.controls.play()
+
+while ($w.playState -ne 1 -and $w.playState -ne 8) {
+    Start-Sleep -Milliseconds 100
+}
+`, strings.ReplaceAll(abs, `'`, `''`), intVol, rate, startSec)
+
+	cmd := exec.CommandContext(ctx, "powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script)
+	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: 0x08000000}
+	_ = cmd.Run()
+}
+
+// runVideo streams raw RGBA frames from ffmpeg when available.
 func (e *PlaybackEngine) runVideo(ctx context.Context, path string, start time.Duration, rate float64, duration time.Duration, vw, vh int) {
-	// Decode at the video's native pixel dimensions — no quality loss.
-	// -s WxH is faster than -vf scale and does not add padding.
 	targetFPS := 25.0
 	cmd := exec.CommandContext(ctx, "ffmpeg",
 		"-ss", fmt.Sprintf("%.3f", start.Seconds()),
@@ -384,12 +511,12 @@ func (e *PlaybackEngine) runVideo(ctx context.Context, path string, start time.D
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		e.runFallback(ctx, path, start, rate, duration)
+		e.runNativeTimer(ctx, path, start, rate, duration, false)
 		return
 	}
 
 	if err := cmd.Start(); err != nil {
-		e.runFallback(ctx, path, start, rate, duration)
+		e.runNativeTimer(ctx, path, start, rate, duration, false)
 		return
 	}
 
@@ -443,29 +570,39 @@ func (e *PlaybackEngine) runVideo(ctx context.Context, path string, start time.D
 	}
 }
 
-func (e *PlaybackEngine) runFallback(ctx context.Context, path string, start time.Duration, rate float64, duration time.Duration) {
-	ticker := time.NewTicker(time.Duration(float64(40*time.Millisecond) / rate))
+// runNativeTimer advances playback in real-time without ffmpeg, rendering audio visualizers or video canvases.
+func (e *PlaybackEngine) runNativeTimer(ctx context.Context, path string, start time.Duration, rate float64, duration time.Duration, isAudio bool) {
+	step := 33 * time.Millisecond
+	interval := time.Duration(float64(step) / rate)
+	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
+
 	currentPos := start
-	step := 40 * time.Millisecond
 
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			currentPos += step
+			currentPos += time.Duration(float64(step) * rate)
 			if duration > 0 && currentPos > duration {
 				currentPos = duration
 			}
+
 			e.mu.Lock()
 			e.position = currentPos
 			e.mu.Unlock()
 
-			img := GenerateTestFrame(filepath.Base(path), currentPos, duration, defaultWidth, defaultHeight)
 			if e.onFrame != nil {
+				var img image.Image
+				if isAudio {
+					img = GenerateAudioFrame(filepath.Base(path), currentPos, duration, defaultWidth, defaultHeight)
+				} else {
+					img = GenerateTestFrame(filepath.Base(path), currentPos, duration, defaultWidth, defaultHeight)
+				}
 				e.onFrame(img, currentPos)
 			}
+
 			if duration > 0 && currentPos >= duration {
 				e.handlePlaybackEnded()
 				return
@@ -484,6 +621,70 @@ func (e *PlaybackEngine) handlePlaybackEnded() {
 	if endCb != nil {
 		endCb()
 	}
+}
+
+// GenerateAudioFrame renders an animated audio waveform/spectrum visualization in real-time.
+func GenerateAudioFrame(title string, at, total time.Duration, width, height int) image.Image {
+	img := image.NewRGBA(image.Rect(0, 0, width, height))
+
+	// Dark gradient backdrop
+	for y := 0; y < height; y++ {
+		grad := uint8(10 + (y * 15 / height))
+		for x := 0; x < width; x++ {
+			img.SetRGBA(x, y, color.RGBA{R: grad, G: grad + 2, B: grad + 6, A: 255})
+		}
+	}
+
+	// Draw animated frequency spectrum bars in the middle
+	numBars := 48
+	barWidth := (width - 120) / numBars
+	if barWidth < 4 {
+		barWidth = 4
+	}
+	baseX := (width - (numBars * barWidth)) / 2
+	centerY := height / 2
+
+	sec := at.Seconds()
+	for i := 0; i < numBars; i++ {
+		phase := float64(i)*0.25 + sec*3.5
+		wave := math.Sin(phase) + 0.5*math.Cos(phase*1.7) + 0.3*math.Sin(phase*2.9)
+		h := int(math.Abs(wave) * float64(height/4))
+		if h < 4 {
+			h = 4
+		}
+
+		bx := baseX + i*barWidth
+		by1 := centerY - h
+		by2 := centerY + h
+
+		rCol := uint8(40 + (i*4)%120)
+		gCol := uint8(140 + (i*2)%115)
+		bCol := uint8(220)
+
+		for y := by1; y <= by2; y++ {
+			if y >= 0 && y < height {
+				for x := bx; x < bx+barWidth-2 && x < width; x++ {
+					img.SetRGBA(x, y, color.RGBA{R: rCol, G: gCol, B: bCol, A: 255})
+				}
+			}
+		}
+	}
+
+	// Bottom progress accent line
+	if total > 0 {
+		pct := float64(at) / float64(total)
+		if pct > 1 {
+			pct = 1
+		}
+		progW := int(float64(width) * pct)
+		for y := height - 4; y < height; y++ {
+			for x := 0; x < progW; x++ {
+				img.SetRGBA(x, y, color.RGBA{R: 56, G: 189, B: 248, A: 255})
+			}
+		}
+	}
+
+	return img
 }
 
 // GenerateTestFrame creates a synthetic test frame for demo/fallback.
@@ -517,12 +718,12 @@ func GenerateTestFrame(title string, at, total time.Duration, width, height int)
 		progW := int(float64(width) * pct)
 		for y := height - 4; y < height; y++ {
 			for x := 0; x < progW; x++ {
-				img.SetRGBA(x, y, color.RGBA{R: 220, G: 38, B: 38, A: 255}) // Accent red line
+				img.SetRGBA(x, y, color.RGBA{R: 220, G: 38, B: 38, A: 255})
 			}
 		}
 	}
 
-	// Draw decorative center playback diamond/box
+	// Draw decorative center playback box
 	cx, cy := width/2, height/2
 	boxSize := 40
 	for y := cy - boxSize; y <= cy+boxSize; y++ {

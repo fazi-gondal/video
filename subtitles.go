@@ -2,6 +2,8 @@ package main
 
 import (
 	"bufio"
+	"bytes"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -19,10 +21,10 @@ type SubtitleCue struct {
 
 // DefaultSampleCues provides subtitle cues for the demonstration video.
 var DefaultSampleCues = []SubtitleCue{
-	{Start: 500 * time.Millisecond, End: 2500 * time.Millisecond, Text: "Welcome to MyGo & MujicaUI Video Player"},
+	{Start: 500 * time.Millisecond, End: 2500 * time.Millisecond, Text: "Welcome to MyGo Video Player"},
 	{Start: 2800 * time.Millisecond, End: 5200 * time.Millisecond, Text: "Built with high-performance native Go UI"},
 	{Start: 5500 * time.Millisecond, End: 7800 * time.Millisecond, Text: "Full playback controls, seek bar, and file picking"},
-	{Start: 8000 * time.Millisecond, End: 9800 * time.Millisecond, Text: "Court-Gothic design tokens by Zachary Zhang"},
+	{Start: 8000 * time.Millisecond, End: 9800 * time.Millisecond, Text: "Clean, native desktop experience"},
 }
 
 // LoadSubtitles attempts to find an adjacent .srt file or returns default cues.
@@ -46,16 +48,25 @@ func LoadSubtitles(videoPath string) []SubtitleCue {
 	return DefaultSampleCues
 }
 
-// ParseSRTFile parses an SubRip (.srt) subtitle file into cues.
+// ParseSRTFile parses a SubRip (.srt) subtitle file into cues.
 func ParseSRTFile(path string) ([]SubtitleCue, error) {
 	file, err := os.Open(path)
 	if err != nil {
 		return nil, err
 	}
 	defer file.Close()
+	return ParseSRTReader(file)
+}
 
+// ParseSRTBytes parses raw subtitle bytes into cues.
+func ParseSRTBytes(data []byte) ([]SubtitleCue, error) {
+	return ParseSRTReader(bytes.NewReader(data))
+}
+
+// ParseSRTReader parses subtitle text from an io.Reader into cues.
+func ParseSRTReader(r io.Reader) ([]SubtitleCue, error) {
 	var cues []SubtitleCue
-	scanner := bufio.NewScanner(file)
+	scanner := bufio.NewScanner(r)
 	timeRegex := regexp.MustCompile(`(\d{2}):(\d{2}):(\d{2})[,.](\d{3})\s*-->\s*(\d{2}):(\d{2}):(\d{2})[,.](\d{3})`)
 
 	var current SubtitleCue

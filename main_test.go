@@ -5,7 +5,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ZacharyZhang-NY/MujicaUI/media"
 	"github.com/egoist/mygo/ui"
 )
 
@@ -21,7 +20,7 @@ func TestVideoPlayerView(t *testing.T) {
 		Duration: 10 * time.Second, Width: 640, Height: 360,
 		FPS: 25, VideoCodec: "H.264", AudioCodec: "AAC",
 	}
-	a.playlist = []media.PlaylistItem{{
+	a.playlist = []PlaylistItem{{
 		ID: "demo.mp4", Title: "demo.mp4",
 		Subtitle: "640x360 • 0:10", Duration: 10 * time.Second,
 	}}
@@ -50,6 +49,7 @@ func TestVideoPlayerView(t *testing.T) {
 
 func TestPlaybackControlsState(t *testing.T) {
 	a := newApp()
+	a.info = &VideoInfo{Title: "test.mp4", Duration: 30 * time.Second}
 	a.duration = 30 * time.Second
 
 	a.onPlay()
@@ -94,7 +94,7 @@ func TestPlaybackControlsState(t *testing.T) {
 
 func TestPlaylistManagement(t *testing.T) {
 	a := newApp()
-	a.playlist = []media.PlaylistItem{
+	a.playlist = []PlaylistItem{
 		{ID: "v1.mp4", Title: "Video 1", Duration: 10 * time.Second},
 		{ID: "v2.mp4", Title: "Video 2", Duration: 20 * time.Second},
 	}
@@ -144,21 +144,21 @@ func TestSubtitleTrackBuilding(t *testing.T) {
 
 func TestLoopModes(t *testing.T) {
 	a := newApp()
-	if a.loopMode != media.LoopOff {
+	if a.loopMode != LoopOff {
 		t.Errorf("expected LoopOff initially")
 	}
 
 	// Simulate loop button cycling
-	a.loopMode = media.LoopAll
-	if a.loopMode != media.LoopAll {
+	a.loopMode = LoopAll
+	if a.loopMode != LoopAll {
 		t.Errorf("expected LoopAll")
 	}
-	a.loopMode = media.LoopOne
-	if a.loopMode != media.LoopOne {
+	a.loopMode = LoopOne
+	if a.loopMode != LoopOne {
 		t.Errorf("expected LoopOne")
 	}
-	a.loopMode = media.LoopOff
-	if a.loopMode != media.LoopOff {
+	a.loopMode = LoopOff
+	if a.loopMode != LoopOff {
 		t.Errorf("expected LoopOff")
 	}
 }
@@ -177,3 +177,79 @@ func TestGenerateTestFrame(t *testing.T) {
 		t.Fatalf("expected valid RGBA 640x360 image")
 	}
 }
+
+func TestIsAudioPath(t *testing.T) {
+	audioFiles := []string{
+		"track.mp3", "song.wav", "music.flac", "podcast.aac",
+		"album.m4a", "radio.ogg", "classic.wma", "audio.aiff",
+		"file.alac", "melody.mid", "stream.opus", "TRACK.MP3",
+	}
+	for _, f := range audioFiles {
+		if !IsAudioPath(f) {
+			t.Errorf("expected IsAudioPath(%q) = true, got false", f)
+		}
+	}
+
+	nonAudioFiles := []string{
+		"video.mp4", "movie.mkv", "clip.avi", "show.mov", "document.pdf", "image.png",
+	}
+	for _, f := range nonAudioFiles {
+		if IsAudioPath(f) {
+			t.Errorf("expected IsAudioPath(%q) = false, got true", f)
+		}
+	}
+}
+
+func TestGenerateAudioFrame(t *testing.T) {
+	img := GenerateAudioFrame("Test Symphony", 12*time.Second, 180*time.Second, 800, 450)
+	if img == nil {
+		t.Fatal("expected non-nil audio visualizer image")
+	}
+	bounds := img.Bounds()
+	if bounds.Dx() != 800 || bounds.Dy() != 450 {
+		t.Errorf("expected 800x450, got %dx%d", bounds.Dx(), bounds.Dy())
+	}
+}
+
+func TestParseSRTBytes(t *testing.T) {
+	srtData := []byte(`1
+00:00:01,000 --> 00:00:03,500
+Hello, world!
+
+2
+00:00:04,200 --> 00:00:06,800
+Second subtitle line.
+`)
+
+	cues, err := ParseSRTBytes(srtData)
+	if err != nil {
+		t.Fatalf("ParseSRTBytes failed: %v", err)
+	}
+	if len(cues) != 2 {
+		t.Fatalf("expected 2 cues, got %d", len(cues))
+	}
+	if cues[0].Text != "Hello, world!" {
+		t.Errorf("expected cue 0 text 'Hello, world!', got %q", cues[0].Text)
+	}
+	if cues[1].Text != "Second subtitle line." {
+		t.Errorf("expected cue 1 text 'Second subtitle line.', got %q", cues[1].Text)
+	}
+}
+
+func TestNativeDialogFilters(t *testing.T) {
+	pairs := [][2]string{
+		{"Media Files", "*.mp4;*.mp3"},
+		{"All Files", "*.*"},
+	}
+	buf := buildFilterUTF16(pairs)
+	if len(buf) == 0 {
+		t.Fatal("expected non-empty UTF-16 filter buffer")
+	}
+	// Last element must be double null terminator (buf[len-1] == 0 and buf[len-2] == 0)
+	if buf[len(buf)-1] != 0 || buf[len(buf)-2] != 0 {
+		t.Errorf("expected double-null terminated buffer, got trailing %v, %v",
+			buf[len(buf)-2], buf[len(buf)-1])
+	}
+}
+
+

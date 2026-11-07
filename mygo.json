@@ -1,6 +1,6 @@
 {
-  "name": "video",
-  "identifier": "com.example.video",
-  "version": "0.1.0",
+  "name": "Video Player",
+  "identifier": "com.gondal.video",
+  "version": "1.0.0",
   "out": "build"
 }
